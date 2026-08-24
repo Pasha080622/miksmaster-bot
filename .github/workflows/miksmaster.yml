@@ -1,0 +1,33 @@
+name: miksmaster-daily
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 8 * * *'   # 11:00 МСК (резерв; основной триггер — cron-job.org через workflow_dispatch)
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci || npm install
+      - name: Отчёт
+        env:
+          YANDEX_COOKIE: ${{ secrets.YANDEX_COOKIE }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: node report.mjs
+      - name: Сохранить снимок (прирост на завтра)
+        run: |
+          if [ -n "$(git status --porcelain snapshot.json)" ]; then
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add snapshot.json
+            git commit -m "snapshot $(date -u +%F)"
+            git push
+          fi
