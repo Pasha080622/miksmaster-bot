@@ -8,7 +8,7 @@ import fs from 'node:fs';
 const COOKIE = (process.env.YANDEX_COOKIE || '').trim();
 const TG_TOKEN = (process.env.TG_TOKEN || '').trim();
 const CHAT_ID = (process.env.CHAT_ID || '').trim();
-const CAB = '30513587';                 // кабинет ООО Миксмастер
+const CAB = '30513587';                    // кабинет ООО Миксмастер
 const BASE = 'https://cms.tickets.yandex.ru';
 const SNAP_FILE = 'snapshot.json';
 
@@ -27,7 +27,7 @@ function mergeSetCookie(res) {
     const kv = part.split(';')[0].trim();
     if (/^[^=]+=/.test(kv)) {
       const name = kv.split('=')[0];
-      cookie = cookie.replace(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '=[^;]*'), '').replace(/^; /,'').trim();
+      cookie = cookie.replace(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '=[^;]*'), '').replace(/^; /, '').trim();
       cookie = (cookie ? cookie + '; ' : '') + kv;
     }
   }
@@ -87,7 +87,7 @@ async function activeSet(oid) {
     if (c.length < 15) return;
     const dt = $(c[1]).text().trim();
     if (!/^\d{2}\.\d{2}\.\d{4}/.test(dt)) return;
-    if ($(c[2]).text().trim() !== '') return;
+    if ($(c[2]).text().trim() !== '') return; // непустая колонка = закрыто/архив — такие в актив не попадают
     const name = $(c[0]).text().replace(/\s+/g, ' ').trim();
     s.add(`${name}|${dt.split(' ')[0]}`);
   });
@@ -111,7 +111,7 @@ async function evData(oid) {
     if (c.length === 17 && cur) {
       const v = c.map((i, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
       if (v[0] === '') return;
-      const price = parseFloat(v[0].replace(/\s/g, '')) || 0;
+      const price = parseFloat(v[0].replace(/\s+/g, '')) || 0;
       const bil = parseInt(v[11].replace(/[^\d]/g, '')) || 0;
       const sum = parseInt(v[12].replace(/[^\d]/g, '')) || 0;
       const k = `${cur.name}|${cur.date}`;
@@ -147,19 +147,20 @@ async function tg(text) {
   const months = {};
   for (const e of evs) {
     if (/^тест/i.test(e.name)) continue;
-    if (!act.has(`${e.name}|${e.date}`)) continue;
+    if (!act.has(`${e.name}|${e.date}`)) continue; // «закрытые» (не активные) мероприятия сюда не попадают
     const [, mm, yy] = e.date.split('.');
     const key = `${yy}-${mm}`;
     if (key < curKey) continue;
-    if (!months[key]) months[key] = { y: +yy, m: +mm, paid: 0, free: 0, rev: 0 };
+    if (!months[key]) months[key] = { y: +yy, m: +mm, paid: 0, free: 0, rev: 0, count: 0 };
     months[key].paid += e.paid; months[key].free += e.free; months[key].rev += e.rev;
+    months[key].count += 1;
   }
   const keys = Object.keys(months).sort();
 
   const prev = fs.existsSync(SNAP_FILE) ? JSON.parse(fs.readFileSync(SNAP_FILE, 'utf8') || '{}') : {};
   const pm = prev.months || null;
   const fmt = n => n.toLocaleString('ru-RU');
-  const dstr = d => d === 0 ? ' (0)' : ` (${d > 0 ? '+' : '−'}${fmt(Math.abs(d))})`;
+  const dstr = d => d === 0 ? ' (0)' : ` (${d > 0 ? '+' : '-'}${fmt(Math.abs(d))})`;
   const dl = (k, field, cur) => (!pm || !pm[k] || typeof pm[k][field] !== 'number') ? '' : dstr(cur - pm[k][field]);
   const dateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}`;
 
@@ -172,14 +173,48 @@ async function tg(text) {
       `📊 Миксмастер · ${MN[x.m]} ${x.y} (на ${dateStr})\n` +
       `💰 Сумма: ${fmt(x.rev)} р.${dl(k, 'rev', x.rev)}\n` +
       `🎫 Билетов: ${fmt(x.paid)}${dl(k, 'paid', x.paid)}\n` +
-      `🎟 Пригл.изационных: ${fmt(x.free)}${dl(k, 'free', x.free)}\n` +
-      `🧮 Ср.чек: ${fmt(avg)} р.${avgd}`;
+      `🎟️ Пригл.: ${fmt(x.free)}${dl(k, 'free', x.free)}\n` +
+      `🎪 Мероприятий: ${fmt(x.count)}${dl(k, 'count', x.count)}\n` +
+      `🏛️ Ср.чек: ${fmt(avg)} р.${avgd}`;
     await tg(msg);
     await new Promise(z => setTimeout(z, 350));
   }
 
+  if (keys.length) {
+    const tot = { rev: 0, paid: 0, free: 0, count: 0 };
+    for (const k of keys) {
+      tot.rev += months[k].rev; tot.paid += months[k].paid; tot.free += months[k].free; tot.count += months[k].count;
+    }
+    const totAvg = tot.paid ? Math.round(tot.rev / tot.paid) : 0;
+
+    let ptot = null;
+    if (pm) {
+      ptot = { rev: 0, paid: 0, free: 0, count: 0 };
+      let anyCount = false;
+      for (const k of Object.keys(pm)) {
+        ptot.rev += pm[k].rev || 0;
+        ptot.paid += pm[k].paid || 0;
+        ptot.free += pm[k].free || 0;
+        if (typeof pm[k].count === 'number') { ptot.count += pm[k].count; anyCount = true; }
+      }
+      if (!anyCount) ptot.count = null; // в старом снэпшоте ещё нет данных по кол-ву мероприятий
+    }
+    const dtot = (field, cur) => (!ptot || ptot[field] === null || typeof ptot[field] !== 'number') ? '' : dstr(cur - ptot[field]);
+    const totAvgD = (ptot && ptot.paid) ? dstr(totAvg - Math.round(ptot.rev / ptot.paid)) : '';
+
+    const totalMsg =
+      `📊 Миксмастер · ИТОГО (на ${dateStr})\n` +
+      `💰 Сумма: ${fmt(tot.rev)} р.${dtot('rev', tot.rev)}\n` +
+      `🎫 Билетов: ${fmt(tot.paid)}${dtot('paid', tot.paid)}\n` +
+      `🎟️ Пригл.: ${fmt(tot.free)}${dtot('free', tot.free)}\n` +
+      `🎪 Мероприятий: ${fmt(tot.count)}${dtot('count', tot.count)}\n` +
+      `🏛️ Ср.чек: ${fmt(totAvg)} р.${totAvgD}`;
+    await tg(totalMsg);
+    await new Promise(z => setTimeout(z, 350));
+  }
+
   const snap = { date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`, months: {} };
-  for (const k of keys) { const x = months[k]; snap.months[k] = { rev: x.rev, paid: x.paid, free: x.free }; }
+  for (const k of keys) { const x = months[k]; snap.months[k] = { rev: x.rev, paid: x.paid, free: x.free, count: x.count }; }
   fs.writeFileSync(SNAP_FILE, JSON.stringify(snap, null, 2));
-  console.log(`OK: отправлено месяцев ${keys.length}`);
+  console.log(`OK: отправлено месяцев ${keys.length}${keys.length ? ' + итого' : ''}`);
 })().catch(e => { console.error(e.message || e); process.exit(1); });
