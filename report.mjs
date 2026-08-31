@@ -115,6 +115,32 @@ async function evData(oid) {
   return Object.values(acc);
 }
 
+// ext=0: по одной строке на мероприятие — Событие/Дата/Статус/Получено/Свободно/.../Продано/...
+// Нужен, чтобы отличить «запущено (и, возможно, уже завершилось)» от «посчитано, но так и не
+// запущено в продажу» — оба варианта дают статус «закрыто», различаются только тем, выпускались
+// ли когда-либо билеты в свободную продажу.
+async function evStatus(oid) {
+  const r = await get(`/reports/tickets/organizer?report=1&event_date_from=${FROM}&event_date_to=${TO}&organizer_id=${oid}&ext=0`);
+  if (looksLikeLogin(r)) throw new Error('AUTH_FAILED: не залогинен (ext=0)');
+  const $ = cheerio.load(r.body);
+  const out = [];
+  $('table tr').each((_, tr) => {
+    const c = $(tr).find('td,th');
+    if (c.length < 15) return; // короче настоящей строки данных (19 колонок) — это шапка
+    const v = c.map((i, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
+    const dm = (v[1] || '').match(/^(\d{2}\.\d{2}\.\d{4})/);
+    if (!dm) return;
+    out.push({
+      name: v[0],
+      date: dm[1],
+      status: v[2] || '',                                   // '' = на продаже, иначе закрыто/отменено
+      sold: parseInt((v[13] || '0').replace(/[^\d]/g, '')) || 0,   // «Продано», билетов
+      avail: parseInt((v[5] || '0').replace(/[^\d]/g, '')) || 0,   // «Свободно», билетов
+    });
+  });
+  return out;
+}
+
 async function tg(text) {
   const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
     method: 'POST',
@@ -131,16 +157,26 @@ async function tg(text) {
   if (!os.length) throw new Error('Организаторы кабинета не найдены (кука протухла или кабинет пуст)');
   let evs = [];
   for (const oid of os) {
-    evs = evs.concat(await evData(oid));
+    const statusRows = await evStatus(oid);
+    const revMap = {};
+    for (const e of await evData(oid)) revMap[`${e.name}|${e.date}`] = e;
+    for (const s of statusRows) {
+      if (/^тест/i.test(s.name)) continue;
+      if (/отмена/i.test(s.name)) continue;
+      // «закрыто», но билеты никогда не были выпущены в свободную продажу (Продано=0 и Свободно=0) —
+      // значит мероприятие было только просчитано внутри, но так и не запущено. Не считаем его.
+      if (s.status && s.sold === 0 && s.avail === 0) continue;
+      const rv = revMap[`${s.name}|${s.date}`] || { paid: 0, free: 0, rev: 0 };
+      evs.push({ name: s.name, date: s.date, paid: rv.paid, free: rv.free, rev: rv.rev });
+    }
   }
 
   const MN = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
-  // Считаем по ВСЕМ мероприятиям месяца — включая уже прошедшие/закрытые. Отсекаем только тестовые
-  // и отменённые/задвоенные записи (в названии есть «тест» или «отмена») — это не реальные продажи.
+  // Считаем по ВСЕМ ЗАПУЩЕННЫМ мероприятиям месяца — включая уже прошедшие/закрытые (иначе цифры
+  // «теряются» по мере завершения концертов). Мероприятия, которые были только просчитаны, но не
+  // запущены в продажу, уже отфильтрованы выше (по статусу+Продано+Свободно из ext=0).
   const months = {};
   for (const e of evs) {
-    if (/^тест/i.test(e.name)) continue;
-    if (/отмена/i.test(e.name)) continue;
     const [, mm, yy] = e.date.split('.');
     const key = `${yy}-${mm}`;
     if (key < prevKey) continue; // всё раньше предыдущего месяца — не нужно
