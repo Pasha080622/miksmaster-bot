@@ -1,6 +1,11 @@
 // Миксмастер — ежедневный отчёт продаж по месяцам → Telegram
 // Работает на GitHub Actions (без участия Mac). Авторизация в Яндекс.Билеты — через куку сессии (секрет YANDEX_COOKIE).
 // Node 20+ (глобальный fetch). Зависимость: cheerio.
+//
+// Логика месяца: пока месяц идёт (1–30/31 число) — суммы в его строке считаются по ВСЕМ мероприятиям
+// месяца, включая уже прошедшие/закрытые (иначе цифры «теряются» по мере того как концерты закрываются).
+// В 1-й день нового месяца — отдельным разовым сообщением уходит окончательный итог по только что
+// закончившемуся месяцу, и дальше этот месяц из отчёта пропадает — остаются только текущий и будущие.
 
 import * as cheerio from 'cheerio';
 import fs from 'node:fs';
@@ -56,7 +61,12 @@ function looksLikeLogin(r) {
 const pad = n => String(n).padStart(2, '0');
 const now = new Date();
 const curKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
-const FROM = `01.${pad(now.getMonth() + 1)}.${now.getFullYear()}`;
+// предыдущий календарный месяц — нужен, чтобы 1-го числа собрать по нему окончательный итог
+const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+const prevKey = `${prevDate.getFullYear()}-${pad(prevDate.getMonth() + 1)}`;
+// период запроса: с 1-го числа ПРЕДЫДУЩЕГО месяца (чтобы всегда иметь под рукой данные для закрывающего
+// сообщения 1-го числа) и на 400 дней вперёд
+const FROM = `01.${pad(prevDate.getMonth() + 1)}.${prevDate.getFullYear()}`;
 const t2 = new Date(now.getTime() + 400 * 864e5);
 const TO = `${pad(t2.getDate())}.${pad(t2.getMonth() + 1)}.${t2.getFullYear()}`;
 
@@ -75,23 +85,6 @@ async function orgs() {
     if (m) ids.push(m[1]);
   });
   return ids;
-}
-
-async function activeSet(oid) {
-  const r = await get(`/reports/tickets/organizer?report=1&event_date_from=${FROM}&event_date_to=${TO}&organizer_id=${oid}&ext=0`);
-  if (looksLikeLogin(r)) throw new Error('AUTH_FAILED: не залогинен (ext=0)');
-  const $ = cheerio.load(r.body);
-  const s = new Set();
-  $('table tr').each((_, tr) => {
-    const c = $(tr).find('td');
-    if (c.length < 15) return;
-    const dt = $(c[1]).text().trim();
-    if (!/^\d{2}\.\d{2}\.\d{4}/.test(dt)) return;
-    if ($(c[2]).text().trim() !== '') return; // непустая колонка = закрыто/архив — такие в актив не попадают
-    const name = $(c[0]).text().replace(/\s+/g, ' ').trim();
-    s.add(`${name}|${dt.split(' ')[0]}`);
-  });
-  return s;
 }
 
 async function evData(oid) {
@@ -136,26 +129,25 @@ async function tg(text) {
   await get('/city?id=' + CAB);
   const os = await orgs();
   if (!os.length) throw new Error('Организаторы кабинета не найдены (кука протухла или кабинет пуст)');
-  const act = new Set();
   let evs = [];
   for (const oid of os) {
-    (await activeSet(oid)).forEach(x => act.add(x));
     evs = evs.concat(await evData(oid));
   }
 
   const MN = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+  // Считаем по ВСЕМ мероприятиям месяца — включая уже прошедшие/закрытые. Отсекаем только тестовые
+  // и отменённые/задвоенные записи (в названии есть «тест» или «отмена») — это не реальные продажи.
   const months = {};
   for (const e of evs) {
     if (/^тест/i.test(e.name)) continue;
-    if (!act.has(`${e.name}|${e.date}`)) continue; // «закрытые» (не активные) мероприятия сюда не попадают
+    if (/отмена/i.test(e.name)) continue;
     const [, mm, yy] = e.date.split('.');
     const key = `${yy}-${mm}`;
-    if (key < curKey) continue;
+    if (key < prevKey) continue; // всё раньше предыдущего месяца — не нужно
     if (!months[key]) months[key] = { y: +yy, m: +mm, paid: 0, free: 0, rev: 0, count: 0 };
     months[key].paid += e.paid; months[key].free += e.free; months[key].rev += e.rev;
     months[key].count += 1;
   }
-  const keys = Object.keys(months).sort();
 
   const prev = fs.existsSync(SNAP_FILE) ? JSON.parse(fs.readFileSync(SNAP_FILE, 'utf8') || '{}') : {};
   const pm = prev.months || null;
@@ -163,6 +155,27 @@ async function tg(text) {
   const dstr = d => d === 0 ? ' (0)' : ` (${d > 0 ? '+' : '-'}${fmt(Math.abs(d))})`;
   const dl = (k, field, cur) => (!pm || !pm[k] || typeof pm[k][field] !== 'number') ? '' : dstr(cur - pm[k][field]);
   const dateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}`;
+
+  // 1-го числа месяца — окончательный итог по только что закончившемуся месяцу, одним сообщением
+  // (если по месяцу вообще не было продаж — не шлём пустое сообщение)
+  if (now.getDate() === 1 && months[prevKey] && (months[prevKey].paid || months[prevKey].free)) {
+    const x = months[prevKey];
+    const avg = x.paid ? Math.round(x.rev / x.paid) : 0;
+    let avgd = '';
+    if (pm && pm[prevKey] && pm[prevKey].paid) avgd = dstr(avg - Math.round(pm[prevKey].rev / pm[prevKey].paid));
+    const msg =
+      `📊 Миксмастер · ${MN[x.m]} ${x.y} — ИТОГИ МЕСЯЦА\n` +
+      `💰 Сумма: ${fmt(x.rev)} р.${dl(prevKey, 'rev', x.rev)}\n` +
+      `🎫 Билетов: ${fmt(x.paid)}${dl(prevKey, 'paid', x.paid)}\n` +
+      `🎟️ Пригл.: ${fmt(x.free)}${dl(prevKey, 'free', x.free)}\n` +
+      `🎪 Мероприятий: ${fmt(x.count)}${dl(prevKey, 'count', x.count)}\n` +
+      `🏛️ Ср.чек: ${fmt(avg)} р.${avgd}`;
+    await tg(msg);
+    await new Promise(z => setTimeout(z, 350));
+  }
+
+  // дальше — только текущий и будущие месяцы
+  const keys = Object.keys(months).filter(k => k >= curKey).sort();
 
   for (const k of keys) {
     const x = months[k];
@@ -192,6 +205,7 @@ async function tg(text) {
       ptot = { rev: 0, paid: 0, free: 0, count: 0 };
       let anyCount = false;
       for (const k of Object.keys(pm)) {
+        if (k < curKey) continue; // прошлые месяцы в сравнение ИТОГО не тянем
         ptot.rev += pm[k].rev || 0;
         ptot.paid += pm[k].paid || 0;
         ptot.free += pm[k].free || 0;
@@ -216,5 +230,5 @@ async function tg(text) {
   const snap = { date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`, months: {} };
   for (const k of keys) { const x = months[k]; snap.months[k] = { rev: x.rev, paid: x.paid, free: x.free, count: x.count }; }
   fs.writeFileSync(SNAP_FILE, JSON.stringify(snap, null, 2));
-  console.log(`OK: отправлено месяцев ${keys.length}${keys.length ? ' + итого' : ''}`);
+  console.log(`OK: отправлено месяцев ${keys.length}${keys.length ? ' + итого' : ''}${(now.getDate() === 1 && months[prevKey]) ? ' + итоги прошлого месяца' : ''}`);
 })().catch(e => { console.error(e.message || e); process.exit(1); });
