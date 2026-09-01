@@ -74,6 +74,8 @@ async function orgs() {
   const r = await get('/repertoire/organizers/');
   if (looksLikeLogin(r)) throw new Error('AUTH_FAILED: не залогинен (organizers)');
   const $ = cheerio.load(r.body);
+  const activeOpt = $('select.js-city-select option[selected]');
+  console.error(`[debug] active cabinet per select#js-city-select: value=${activeOpt.attr('value') || 'NOT FOUND'} text="${activeOpt.text().trim()}" (expected ${CAB})`);
   const ids = [];
   let stop = false;
   $('table tr').each((_, tr) => {
@@ -142,6 +144,10 @@ async function evStatus(oid) {
 }
 
 async function tg(text) {
+  if ((process.env.DRY_RUN || '') === '1') {
+    console.error('[debug] DRY_RUN — сообщение НЕ отправлено:\n' + text);
+    return;
+  }
   const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -152,24 +158,32 @@ async function tg(text) {
 }
 
 (async () => {
+  console.error(`[debug] now=${new Date().toISOString()} curKey=${curKey} prevKey=${prevKey} FROM=${FROM} TO=${TO}`);
   await get('/city?id=' + CAB);
   const os = await orgs();
+  console.error(`[debug] organizers: ${JSON.stringify(os)}`);
   if (!os.length) throw new Error('Организаторы кабинета не найдены (кука протухла или кабинет пуст)');
   let evs = [];
   for (const oid of os) {
     const statusRows = await evStatus(oid);
     const revMap = {};
-    for (const e of await evData(oid)) revMap[`${e.name}|${e.date}`] = e;
+    const evDataRows = await evData(oid);
+    for (const e of evDataRows) revMap[`${e.name}|${e.date}`] = e;
+    console.error(`[debug] org ${oid}: statusRows=${statusRows.length} evDataRows=${evDataRows.length}`);
+    let kept = 0, skippedTest = 0, skippedNeverLaunched = 0;
     for (const s of statusRows) {
-      if (/^тест/i.test(s.name)) continue;
-      if (/отмена/i.test(s.name)) continue;
+      if (/^тест/i.test(s.name)) { skippedTest++; continue; }
+      if (/отмена/i.test(s.name)) { skippedTest++; continue; }
       // «закрыто», но билеты никогда не были выпущены в свободную продажу (Продано=0 и Свободно=0) —
       // значит мероприятие было только просчитано внутри, но так и не запущено. Не считаем его.
-      if (s.status && s.sold === 0 && s.avail === 0) continue;
+      if (s.status && s.sold === 0 && s.avail === 0) { skippedNeverLaunched++; continue; }
       const rv = revMap[`${s.name}|${s.date}`] || { paid: 0, free: 0, rev: 0 };
       evs.push({ name: s.name, date: s.date, paid: rv.paid, free: rv.free, rev: rv.rev });
+      kept++;
     }
+    console.error(`[debug] org ${oid}: kept=${kept} skippedTest=${skippedTest} skippedNeverLaunched=${skippedNeverLaunched}`);
   }
+  console.error(`[debug] total evs kept: ${evs.length}`);
 
   const MN = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
   // Считаем по ВСЕМ ЗАПУЩЕННЫМ мероприятиям месяца — включая уже прошедшие/закрытые (иначе цифры
@@ -184,6 +198,7 @@ async function tg(text) {
     months[key].paid += e.paid; months[key].free += e.free; months[key].rev += e.rev;
     months[key].count += 1;
   }
+  console.error(`[debug] months: ${JSON.stringify(Object.fromEntries(Object.entries(months).map(([k,v])=>[k,{count:v.count,paid:v.paid,rev:v.rev}])))}`);
 
   const prev = fs.existsSync(SNAP_FILE) ? JSON.parse(fs.readFileSync(SNAP_FILE, 'utf8') || '{}') : {};
   const pm = prev.months || null;
@@ -265,6 +280,10 @@ async function tg(text) {
 
   const snap = { date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`, months: {} };
   for (const k of keys) { const x = months[k]; snap.months[k] = { rev: x.rev, paid: x.paid, free: x.free, count: x.count }; }
-  fs.writeFileSync(SNAP_FILE, JSON.stringify(snap, null, 2));
+  if ((process.env.DRY_RUN || '') === '1') {
+    console.error('[debug] DRY_RUN — snapshot.json НЕ перезаписан');
+  } else {
+    fs.writeFileSync(SNAP_FILE, JSON.stringify(snap, null, 2));
+  }
   console.log(`OK: отправлено месяцев ${keys.length}${keys.length ? ' + итого' : ''}${(now.getDate() === 1 && months[prevKey]) ? ' + итоги прошлого месяца' : ''}`);
 })().catch(e => { console.error(e.message || e); process.exit(1); });
