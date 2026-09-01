@@ -1,8 +1,13 @@
 name: miksmaster-daily
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Тестовый прогон без отправки в Telegram и без сохранения snapshot.json'
+        type: boolean
+        default: false
   schedule:
-    - cron: '0 8 * * *'   # 11:00 МСК (резерв; основной триггер — cron-job.org через workflow_dispatch)
+    - cron: '0 8 * * *' # 11:00 МСК (резерв; основной триггер — cron-job.org через workflow_dispatch)
 
 permissions:
   contents: write
@@ -21,8 +26,10 @@ jobs:
           YANDEX_COOKIE: ${{ secrets.YANDEX_COOKIE }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node report.mjs
       - name: Сохранить снимок (прирост на завтра)
+        if: ${{ !inputs.dry_run }}
         run: |
           if [ -n "$(git status --porcelain snapshot.json)" ]; then
             git config user.name "github-actions"
