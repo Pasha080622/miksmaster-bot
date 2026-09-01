@@ -23,12 +23,22 @@ if (!COOKIE || !TG_TOKEN || !CHAT_ID) {
 }
 
 // --- единый cookie-jar: стартуем с секрета, до-мёржим Set-Cookie от /city ---
+// ВАЖНО: res.headers.get('set-cookie') в Node/undici при НЕСКОЛЬКИХ Set-Cookie-заголовках
+// (а /city?id=... шлёт сразу несколько — сессионную и куку выбранного кабинета) склеивает их
+// через запятую в одну строку. Даты вида "Expires=Wdy, DD-Mon-YYYY" сами содержат запятую,
+// поэтому наивный split(',') ломает разбор и в итоге куку кабинета иногда теряет/портит —
+// из-за этого запросы уходили не в тот кабинет. Правильный способ — getSetCookie(),
+// которая отдаёт каждый Set-Cookie отдельной строкой без склейки.
 let cookie = COOKIE;
 function mergeSetCookie(res) {
-  const sc = res.headers.get('set-cookie');
-  if (!sc) return;
-  // грубый разбор: name=value; ...
-  for (const part of sc.split(/,(?=[^ ;]+=)/)) {
+  let parts;
+  if (typeof res.headers.getSetCookie === 'function') {
+    parts = res.headers.getSetCookie();
+  } else {
+    const sc = res.headers.get('set-cookie');
+    parts = sc ? sc.split(/,(?=[^ ;]+=)/) : [];
+  }
+  for (const part of parts) {
     const kv = part.split(';')[0].trim();
     if (/^[^=]+=/.test(kv)) {
       const name = kv.split('=')[0];
