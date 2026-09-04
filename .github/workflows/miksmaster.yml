@@ -6,8 +6,9 @@ on:
         description: 'Тестовый прогон без отправки в Telegram и без сохранения snapshot.json'
         type: boolean
         default: false
-  schedule:
-    - cron: '0 8 * * *' # 11:00 МСК (резерв; основной триггер — cron-job.org через workflow_dispatch)
+  # Встроенный schedule: убран - GitHub Actions ненадежно (часто пропускает) триггерит cron
+  # на приватных репозиториях с низкой активностью. Единственный триггер теперь - внешний
+  # будильник cron-job.org, который дергает workflow_dispatch через GitHub API каждый день в 11:00 МСК.
 
 permissions:
   contents: write
