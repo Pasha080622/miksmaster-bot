@@ -196,6 +196,11 @@ async function orgs() {
 }
 
 // --- активные (не закрытые/архивные) мероприятия организатора ---
+// ВАЖНО (найдено 07.09 по жалобе Павла): одно и то же название мероприятия может идти НЕСКОЛЬКО
+// РАЗ в один день в разное время (напр. «Моя Мишель» 26.09.2026 в 19:00 и в 19:30 — это два разных
+// показа). Ключ «имя|дата» без времени схлопывал их в одну запись, и один из показов молча пропадал
+// или получал чужие цифры. Поэтому ключ везде (здесь, в evData и soldVenues) строится как
+// «имя|дата|время», а не «имя|дата».
 async function activeSet(oid) {
   const r = await get(`/reports/tickets/organizer?report=1&event_date_from=${FROM}&event_date_to=${TO}&organizer_id=${oid}&ext=0`);
   if (looksLikeLogin(r)) throw new Error('AUTH_FAILED: не залогинен (ext=0)');
@@ -208,7 +213,8 @@ async function activeSet(oid) {
     if (!/^\d{2}\.\d{2}\.\d{4}/.test(dt)) return;
     if ($(c[2]).text().trim() !== '') return; // непустая колонка = закрыто/архив
     const name = $(c[0]).text().replace(/\s+/g, ' ').trim();
-    s.add(`${name}|${dt.split(' ')[0]}`);
+    const [date, time] = dt.split(' ');
+    s.add(`${name}|${date}|${time || ''}`);
   });
   return s;
 }
@@ -224,8 +230,8 @@ async function evData(oid) {
     const c = $(tr).find('td,th');
     if (c.length === 1) {
       const t = $(c[0]).text().replace(/\s+/g, ' ').trim();
-      const m = t.match(/^(.*)\((\d{2}\.\d{2}\.\d{4})[^)]*\)\s*$/);
-      cur = m ? { name: m[1].trim(), date: m[2] } : null;
+      const m = t.match(/^(.*)\((\d{2}\.\d{2}\.\d{4})(?:\s+(\d{2}:\d{2}))?[^)]*\)\s*$/);
+      cur = m ? { name: m[1].trim(), date: m[2], time: m[3] || '' } : null;
       return;
     }
     if (c.length === 17 && cur) {
@@ -234,8 +240,8 @@ async function evData(oid) {
       const price = parseFloat(v[0].replace(/\s+/g, '')) || 0;
       const bil = parseInt(v[11].replace(/[^\d]/g, '')) || 0;
       const sum = parseInt(v[12].replace(/[^\d]/g, '')) || 0;
-      const k = `${cur.name}|${cur.date}`;
-      if (!acc[k]) acc[k] = { name: cur.name, date: cur.date, paid: 0, free: 0, rev: 0 };
+      const k = `${cur.name}|${cur.date}|${cur.time}`;
+      if (!acc[k]) acc[k] = { name: cur.name, date: cur.date, time: cur.time, paid: 0, free: 0, rev: 0 };
       if (price > 0) { acc[k].paid += bil; acc[k].rev += sum; } else acc[k].free += bil;
     }
   });
@@ -260,8 +266,8 @@ async function soldVenues() {
     if (tds.length >= 8 && /^\d+$/.test($(tds[0]).text().trim())) {
       const name = $(tds[1]).text().replace(/\s+/g, ' ').trim();
       const dt = $(tds[2]).text().replace(/\s+/g, ' ').trim(); // "DD.MM.YYYY HH:MM"
-      const date = dt.split(' ')[0];
-      out[`${name}|${date}`] = { venue, hall };
+      const [date, time] = dt.split(' ');
+      out[`${name}|${date}|${time || ''}`] = { venue, hall };
     }
   });
   return out;
@@ -320,7 +326,7 @@ function deltaStr(cur, prior) {
     for (const e of evs) {
       if (/^тест/i.test(e.name)) continue;
       if (/отмена/i.test(e.name)) continue;
-      const key = `${e.name}|${e.date}`;
+      const key = `${e.name}|${e.date}|${e.time || ''}`;
       // Раньше здесь стояло `if (!act.has(key)) continue;` — оно выбрасывало ЗАКРЫТЫЕ/архивные
       // мероприятия целиком, хотя evData() (ext=1) их уже отдаёт с финальными цифрами продаж.
       // Из-за этого завершённые концерты вообще никогда не попадали в отчёт. Теперь оставляем
@@ -331,13 +337,13 @@ function deltaStr(cur, prior) {
       if (!city && vc.candidates.length > 1) {
         city = await disambiguateByComment(cab.id, e.name, vc.candidates);
         if (city) {
-          console.error(`[info] город "${city}" для площадки "${v.venue}" (${e.name}, ${e.date}) определён по комментарию мероприятия`);
+          console.error(`[info] город "${city}" для площадки "${v.venue}" (${e.name}, ${e.date} ${e.time || ''}) определён по комментарию мероприятия`);
         } else {
           ambiguousVenues.push({ venue: v.venue, cities: vc.candidates, event: e.name, date: e.date });
         }
       }
       events[key] = {
-        name: e.name, date: e.date, paid: e.paid, free: e.free,
+        name: e.name, date: e.date, time: e.time || '', paid: e.paid, free: e.free,
         venue: v.venue || '', hall: v.hall || '', cabinet: cab.name,
         city, active: act.has(key),
       };
@@ -403,15 +409,18 @@ function deltaStr(cur, prior) {
     if (isFinished && alreadyReported) continue;
 
     const statusLine = `${x.name}   ${isFinished ? 'Завершён' : 'В продаже'}`;
-    const cityLine = x.city ? `${x.city}\n` : '';
+    const cityLine = x.city ? `📍 ${x.city}\n` : '';
     // x.hall — это описание рассадки/зоны продаж («ТП + столы»), а не город/зал — в реальном
     // отчёте такого нет, поэтому в сообщение идёт только название площадки.
     const countLine = isFinished
-      ? `🏁 ИТОГ: ${fmt(x.paid)}${d}`
-      : `${fmt(x.paid)}${d}`;
+      ? `🏁 ИТОГ: 🎫 ${fmt(x.paid)}${d}`
+      : `🎫 ${fmt(x.paid)}${d}`;
     const freeLine = x.free ? `\n🎟️ Пригласительных: ${fmt(x.free)}` : '';
+    // Дата с временем — если в этот день у мероприятия несколько разных показов (напр. «Моя Мишель»
+    // 26.09 в 19:00 и 19:30 — это два разных концерта), без времени их было бы не отличить в тексте.
+    const dateLine = x.time ? `${x.date} ${x.time}` : x.date;
     blocks.push(
-      `${statusLine}\n${cityLine}${x.venue ? x.venue + '\n' : ''}${x.date}\n${countLine}${freeLine}`
+      `${statusLine}\n${cityLine}${x.venue ? x.venue + '\n' : ''}${dateLine}\n${countLine}${freeLine}`
     );
   }
 
