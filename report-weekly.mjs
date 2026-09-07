@@ -92,15 +92,63 @@ let venueCacheDirty = false;
 
 // В CMS у Павла встречаются залы-дубли: несколько записей с ОДИНАКОВЫМ названием площадки,
 // но разными id и разными городами (напр. «Руки Вверх! Бар» — сразу 3 таких записи). По одному
-// названию их не различить, поэтому если совпадений несколько и города расходятся — город
-// оставляем пустым (лучше пусто, чем неверно) и запоминаем площадку в ambiguousVenues, чтобы
-// вывести список Павлу для ручной проверки/переименования дублей в CMS.
+// названию их через /halls/ не различить. В этом случае пробуем второй источник, который прямо
+// просил Павел — комментарий у карточки «Мероприятие» в разделе «Репертуар → Мероприятия»
+// (/repertoire/activities/): там для каждого конкретного показа обычно указан город и/или зал
+// (напр. «Волгоград / Kultura concert hall», «Рязань / РВБ»). Формат комментария не унифицирован
+// (иногда «Город / Зал», иногда «Зал ГОРОД» одним словом без разделителя, иногда порядок обратный —
+// «Тур/Город»), поэтому его структуру не парсим, а просто проверяем, встречается ли в тексте ровно
+// ОДИН из городов-кандидатов дублирующихся залов; если совпал ровно один — берём его, если ни
+// одного или несколько — город остаётся пустым (лучше пусто, чем неверно), а площадка попадает
+// в ambiguousVenues, чтобы вывести список Павлу для ручной проверки/переименования дублей в CMS.
 const ambiguousVenues = [];
+const activitiesCache = {}; // id кабинета -> [{name, comment}] (Репертуар → Мероприятия)
 
+async function fetchActivities(cabinetId) {
+  if (activitiesCache[cabinetId]) return activitiesCache[cabinetId];
+  const rows = [];
+  for (let page = 1; page <= 12; page++) {
+    let r;
+    try { r = await get(`/repertoire/activities/?page=${page}`); } catch { break; }
+    const $ = cheerio.load(r.body);
+    let found = 0;
+    $('table tr').each((_, tr) => {
+      const tds = $(tr).find('td');
+      if (tds.length >= 2) {
+        const name = $(tds[0]).text().replace(/\s+/g, ' ').trim();
+        const comment = $(tds[1]).text().replace(/\s+/g, ' ').trim();
+        if (name) { rows.push({ name, comment }); found++; }
+      }
+    });
+    if (found < 25) break; // страница неполная — дальше страниц нет
+  }
+  activitiesCache[cabinetId] = rows;
+  return rows;
+}
+
+async function disambiguateByComment(cabinetId, eventName, candidateCities) {
+  try {
+    const rows = await fetchActivities(cabinetId);
+    for (const r of rows) {
+      if (r.name !== eventName || !r.comment) continue;
+      const hit = candidateCities.filter((c) => r.comment.includes(c));
+      if (hit.length === 1) return hit[0];
+    }
+  } catch { /* сеть подвела — не критично, город останется пустым */ }
+  return '';
+}
+
+// Возвращает { city, candidates } — city заполнен, если город однозначен; иначе candidates —
+// список городов-кандидатов (площадка-дубль), которые может попробовать разрешить вызывающий код
+// через disambiguateByComment (для этого нужны кабинет и название мероприятия — их знает только
+// основной цикл, а не эта функция, поэтому окончательное решение принимается там).
 async function fetchVenueCity(venueName) {
-  if (!venueName) return '';
-  if (Object.prototype.hasOwnProperty.call(venueCityCache, venueName)) return venueCityCache[venueName];
-  let city = '';
+  if (!venueName) return { city: '', candidates: [] };
+  if (Object.prototype.hasOwnProperty.call(venueCityCache, venueName)) {
+    const cached = venueCityCache[venueName];
+    return typeof cached === 'string' ? { city: cached, candidates: [] } : cached;
+  }
+  const result = { city: '', candidates: [] };
   try {
     const r = await get(`/halls/?_q=${encodeURIComponent(venueName)}`);
     const re = /href="edit\?id=(\d+)" class="js-venue-item"[^>]*>([^<]*)<\/a>/g;
@@ -115,16 +163,12 @@ async function fetchVenueCity(venueName) {
       const cm = r2.body.match(/Город<\/label>\s*<div[^>]*>\s*<span>([^<]*)<\/span>/);
       if (cm && cm[1].trim()) cities.add(cm[1].trim());
     }
-    if (cities.size === 1) {
-      city = [...cities][0];
-    } else if (cities.size > 1) {
-      city = '';
-      ambiguousVenues.push({ venue: venueName, cities: [...cities] });
-    }
+    if (cities.size === 1) result.city = [...cities][0];
+    else if (cities.size > 1) result.candidates = [...cities];
   } catch { /* сеть подвела — не критично, город останется пустым в этот раз */ }
-  venueCityCache[venueName] = city;
+  venueCityCache[venueName] = result;
   venueCacheDirty = true;
-  return city;
+  return result;
 }
 
 // --- список всех кабинетов (юрлиц) ---
@@ -282,7 +326,16 @@ function deltaStr(cur, prior) {
       // Из-за этого завершённые концерты вообще никогда не попадали в отчёт. Теперь оставляем
       // все события из evData, а через act.has(key) только помечаем «завершено/в продаже».
       const v = venues[key] || {};
-      const city = await fetchVenueCity(v.venue);
+      const vc = await fetchVenueCity(v.venue);
+      let city = vc.city;
+      if (!city && vc.candidates.length > 1) {
+        city = await disambiguateByComment(cab.id, e.name, vc.candidates);
+        if (city) {
+          console.error(`[info] город "${city}" для площадки "${v.venue}" (${e.name}, ${e.date}) определён по комментарию мероприятия`);
+        } else {
+          ambiguousVenues.push({ venue: v.venue, cities: vc.candidates, event: e.name, date: e.date });
+        }
+      }
       events[key] = {
         name: e.name, date: e.date, paid: e.paid, free: e.free,
         venue: v.venue || '', hall: v.hall || '', cabinet: cab.name,
@@ -387,11 +440,12 @@ function deltaStr(cur, prior) {
     try { fs.writeFileSync(VENUE_CACHE_FILE, JSON.stringify(venueCityCache, null, 2)); }
     catch (e) { console.error('[debug] не удалось сохранить venue-city-cache.json:', e.message || e); }
   }
-  // Площадки-дубли (одинаковое название, разные города в CMS) — город не показан, т.к. не различить.
-  // Список — только в лог, Павлу для ручной проверки/переименования дублей в разделе «Залы».
+  // Площадки-дубли (одинаковое название, разные города в CMS), которые не удалось различить даже
+  // по комментарию мероприятия — город не показан. Список — только в лог, Павлу для ручной проверки
+  // /переименования дублей в разделе «Залы» (или уточнения комментария у мероприятия).
   if (ambiguousVenues.length) {
     console.error('[warn] город не определён однозначно (в CMS несколько залов с одинаковым названием, но разными городами):');
-    for (const a of ambiguousVenues) console.error(`  - "${a.venue}": ${a.cities.join(' / ')}`);
+    for (const a of ambiguousVenues) console.error(`  - "${a.venue}" (${a.event}, ${a.date}): ${a.cities.join(' / ')}`);
   }
   console.log(`OK: кабинетов ${cabs.length}, мероприятий ${keys.length} (в продаже ${onSale}, завершено ${finished})`);
 })().catch(e => { console.error(e.message || e); process.exit(1); });
