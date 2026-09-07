@@ -281,22 +281,34 @@ function deltaStr(cur, prior) {
   const pe = prev.events || {};
   const pm = prev.months || {};
 
-  const keys = Object.keys(events).sort((a, b) => {
+  const todayKey = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  const dateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}`;
+
+  // Кроме реально завершённых/идущих в продаже событий, evData() (ext=1) отдаёт и «черновики» —
+  // мероприятия, которые CMS ещё не выставила на продажу (не входят в activeSet, дата в будущем,
+  // 0 продано, без площадки — soldVenues() по ним банер не строит, поэтому venue/city всегда пустые).
+  // Раньше они молча выбрасывались через `if (!act.has(key)) continue;`; при переходе на «показывать
+  // завершённые» это привело к тому, что такие черновики тоже стали помечаться «Завершён, ИТОГ: 0» —
+  // что неверно: они не «завершились», их просто ещё не запускали. Оставляем в отчёте только события,
+  // у которых либо дата уже прошла, либо они сейчас реально в продаже (act.has) — как и раньше для
+  // черновиков, но больше НЕ выбрасываем прошедшие события, у которых просто закрылись продажи.
+  const keys = Object.keys(events).filter(k => {
+    const x = events[k];
+    const evKey = x.date.split('.').reverse().join('');
+    return x.active || evKey < todayKey;
+  }).sort((a, b) => {
     const da = events[a].date.split('.').reverse().join('');
     const db = events[b].date.split('.').reverse().join('');
     return da.localeCompare(db);
   });
 
-  const todayKey = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
-  const dateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}`;
-
   let onSale = 0, finished = 0, totalPaid = 0, totalFree = 0;
   const blocks = [];
   for (const k of keys) {
     const x = events[k];
-    // «Завершено» теперь определяем по самому CMS (x.active из activeSet — непустая колонка
-    // статуса = закрыто/архив), а не по сравнению дат: дата разовая, а концерт с рассадкой на
-    // несколько дней/сеансов CMS сама закрывает только когда продажи реально прекращены.
+    // «Завершено» определяем по самому CMS (x.active из activeSet — непустая колонка статуса =
+    // закрыто/архив) ИЛИ по дате в прошлом — этого достаточно, т.к. черновики без даты в прошлом
+    // и без active уже отфильтрованы выше.
     const evKey = x.date.split('.').reverse().join('');
     const isFinished = !x.active || evKey < todayKey;
     if (isFinished) finished++; else onSale++;
