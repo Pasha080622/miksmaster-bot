@@ -186,7 +186,18 @@ async function tg(text) {
 
 const fmt = n => n.toLocaleString('ru-RU');
 const dstr = d => d === 0 ? ' (0)' : ` (${d > 0 ? '+' : '-'}${fmt(Math.abs(d))})`;
-const pct = (cur, prev) => (typeof prev !== 'number' || prev <= 0) ? '' : ` / ${cur - prev >= 0 ? '+' : '-'}${Math.round(Math.abs(cur - prev) / prev * 100)}%`;
+// Дельта+% ОДНОЙ скобкой, как в реальном отчёте: "94 (+20 / +27%)", "17 (+17 с нуля)", "0 (0)".
+// prior === undefined — истории ещё нет (первый запуск без снапшота) → скобку не показываем вовсе.
+function deltaStr(cur, prior) {
+  if (typeof prior !== 'number') return '';
+  const d = cur - prior;
+  if (d === 0) return ' (0)';
+  const sign = d > 0 ? '+' : '-';
+  let s = ` (${sign}${fmt(Math.abs(d))}`;
+  if (prior > 0) s += ` / ${sign}${Math.round(Math.abs(d) / prior * 100)}%`;
+  else if (cur > 0) s += ' с нуля';
+  return s + ')';
+}
 
 (async () => {
   await get('/');
@@ -243,15 +254,16 @@ const pct = (cur, prev) => (typeof prev !== 'number' || prev <= 0) ? '' : ` / ${
     totalPaid += x.paid; totalFree += x.free;
 
     const prior = pe[k];
-    const d = dstr(x.paid - (prior ? prior.paid : x.paid));
-    const p = pct(x.paid, prior ? prior.paid : undefined);
+    const d = deltaStr(x.paid, prior ? prior.paid : undefined);
     const statusLine = `${x.name}   ${isFinished ? 'Завершён' : 'В продаже'}`;
-    const venueLines = [x.venue, x.hall].filter(Boolean).join('\n');
+    // x.hall — это описание рассадки/зоны продаж («ТП + столы»), а не город/зал — в реальном
+    // отчёте такого нет, поэтому в сообщение идёт только название площадки.
     const countLine = isFinished
-      ? `🏁 ИТОГ: ${fmt(x.paid)}${d}${p}`
-      : `🎫 Продано: ${fmt(x.paid)}${d}${p}`;
+      ? `🏁 ИТОГ: ${fmt(x.paid)}${d}`
+      : `${fmt(x.paid)}${d}`;
+    const freeLine = x.free ? `\n🎟️ Пригласительных: ${fmt(x.free)}` : '';
     blocks.push(
-      `${statusLine}\n${venueLines ? venueLines + '\n' : ''}${x.date}\n${countLine}\n🎟️ Пригласительных: ${fmt(x.free)}`
+      `${statusLine}\n${x.venue ? x.venue + '\n' : ''}${x.date}\n${countLine}${freeLine}`
     );
   }
 
