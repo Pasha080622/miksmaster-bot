@@ -74,40 +74,43 @@ const FROM = `01.${pad(now.getMonth() + 1)}.${now.getFullYear()}`;
 const t2 = new Date(now.getTime() + 400 * 864e5);
 const TO = `${pad(t2.getDate())}.${pad(t2.getMonth() + 1)}.${t2.getFullYear()}`;
 
-// --- Город/район по кабинету ---
-// Каждый кабинет (юрлицо) в Яндекс.Билетах — это, как правило, ОДНА постоянная площадка в
-// ОДНОМ городе; сам CMS не хранит «город» отдельным полем нигде в отчётах/организаторах/залах
-// (проверено: /repertoire/organizers/, /reports/tickets/sold, /repertoire/events/edit, /halls/ —
-// нигде нет отдельной колонки «Город»), но название кабинета (юрлица) само его называет —
-// напр. «ООО РВ МОСКВА (РВ_МСК_ТАГ)» = Москва, Таганка. Список собран вручную по всем 18
-// кабинетам через /api/cities — при появлении нового кабинета допишите сюда его id → город.
-const CABINET_CITY = {
-  '19373779': 'Московский',           // ООО РВ МОСКОВСКИЙ (РВ_СПБ_МОС) — площадка «Московский», уточнить город
-  '19376401': 'Одинцово',             // ООО РВБ ОДИНЦОВО
-  '19400979': 'Калининград',          // ООО РВ КАЛИНИНГРАД
-  '19417758': 'Москва, Строгино',     // ООО АМ РЕСТОХОЛДИНГ (РВБ_МСК_СТРОГ)
-  '31629333': 'Зеленоград',           // ООО РВБ ЗЕЛЕНОГРАД
-  '31643102': 'Новосибирск',          // ООО РВБ НСК
-  '31653237': 'Уфа',                  // ООО РВ УФА
-  '31653751': 'Вверх',                // ООО ВВЕРХ (РВ_ТЮМ_ЧЕЛ) — уточнить город (Тюмень/Челябинск?)
-  '32045493': 'Екатеринбург',         // ООО РВ РАДИЩЕВА
-  '33221531': 'Пермь',                // ООО РВ СИБИРСКАЯ
-  '34598676': 'Москва, Тверская',     // ООО РВ МОСКВА (РВ_МСК_ТВЕР)
-  '34742621': 'Москва, Таганка',      // ООО РВ МОСКВА (РВ_МСК_ТАГ)
-  '35246093': 'Москва, Автозаводская',// ООО РВ МОСКВА (МСК АВТОЗАВОДСКАЯ)
-  '36264653': 'Москва, Олимпийский',  // ООО РВ МОСКВА (РВ_МСК_ОЛИМП)
-  '36982941': 'Москва, Зеленоград',   // ООО РВ ЯБЛОНЕВАЯ (РВ_МСК_ЗЛНГ)
-  '39902370': 'Москва',               // ООО РВ МОСКВА (РВ_СПБ_КУЛЬТ) — уточнить город
-  '48858587': 'Грибоедов',            // РВБ Грибоедов — уточнить город
-};
-// Кабинет 30513587 = «ООО МИКСМАСТЕР (УК)» — это НЕ конкретная площадка, а управляющая
-// компания, через которую идут разовые гастрольные даты в разных городах (Абакан, Иваново…).
-// Для него город берём по названию площадки из soldVenues() — дополняйте список по мере
-// появления новых гастрольных площадок.
-const TOURING_CABINET_ID = '30513587';
-const TOURING_VENUE_CITY = {
-  'Дворец молодёжи': 'Абакан',
-};
+// --- Город по площадке (реальные данные, а не по названию кабинета) ---
+// У каждой площадки в разделе «Репертуар → Залы» (/halls/) есть собственное поле «Город»
+// (плюс адрес/координаты на карте) — это и есть настоящий источник города, который ведёт сама
+// площадка/менеджер при заведении зала, а не догадка по названию юрлица-кабинета (кабинет может
+// обслуживать площадки в разных городах, и наоборот — некоторые названия площадок неоднозначны,
+// напр. просто «Руки Вверх! Бар» без города в названии). /halls/ — список — рендерится на клиенте
+// без city в HTML, но есть рабочий постраничный поиск `/halls/?_q=<название>` (см. ниже), который
+// отдаёт обычный серверный HTML с строками `<a href="edit?id=ID" class="js-venue-item">Название</a>`;
+// а сама страница `/halls/edit?id=ID` уже отдаёт «Город» открытым текстом в <span>. Результаты
+// кешируются в venue-city-cache.json, чтобы не дёргать /halls/ на каждый запуск ради одних и тех же
+// ~60-90 площадок недели.
+const VENUE_CACHE_FILE = 'venue-city-cache.json';
+let venueCityCache = {};
+try { venueCityCache = JSON.parse(fs.readFileSync(VENUE_CACHE_FILE, 'utf8')); } catch { /* нет файла — начнём с пустого */ }
+let venueCacheDirty = false;
+
+async function fetchVenueCity(venueName) {
+  if (!venueName) return '';
+  if (Object.prototype.hasOwnProperty.call(venueCityCache, venueName)) return venueCityCache[venueName];
+  let city = '';
+  try {
+    const r = await get(`/halls/?_q=${encodeURIComponent(venueName)}`);
+    const re = /href="edit\?id=(\d+)" class="js-venue-item"[^>]*>([^<]*)<\/a>/g;
+    let m, id = null;
+    while ((m = re.exec(r.body))) {
+      if (m[2].trim() === venueName) { id = m[1]; break; } // точное совпадение названия, не первое попавшееся
+    }
+    if (id) {
+      const r2 = await get(`/halls/edit?id=${id}`);
+      const cm = r2.body.match(/Город<\/label>\s*<div[^>]*>\s*<span>([^<]*)<\/span>/);
+      if (cm) city = cm[1].trim();
+    }
+  } catch { /* сеть подвела — не критично, город останется пустым в этот раз */ }
+  venueCityCache[venueName] = city;
+  venueCacheDirty = true;
+  return city;
+}
 
 // --- список всех кабинетов (юрлиц) ---
 async function cities() {
@@ -264,9 +267,7 @@ function deltaStr(cur, prior) {
       // Из-за этого завершённые концерты вообще никогда не попадали в отчёт. Теперь оставляем
       // все события из evData, а через act.has(key) только помечаем «завершено/в продаже».
       const v = venues[key] || {};
-      const city = cab.id === TOURING_CABINET_ID
-        ? (TOURING_VENUE_CITY[v.venue] || '')
-        : (CABINET_CITY[cab.id] || '');
+      const city = await fetchVenueCity(v.venue);
       events[key] = {
         name: e.name, date: e.date, paid: e.paid, free: e.free,
         venue: v.venue || '', hall: v.hall || '', cabinet: cab.name,
@@ -350,30 +351,7 @@ function deltaStr(cur, prior) {
   chunks.push(chunk);
   for (const c of chunks) { await tg(c); await new Promise(z => setTimeout(z, 350)); }
 
-  // --- итого по месяцам (с учётом завершённых) ---
-  const MN = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
-  const months = {};
-  for (const k of keys) {
-    const x = events[k];
-    const [, mm, yy] = x.date.split('.');
-    const mk = `${yy}-${mm}`;
-    if (!months[mk]) months[mk] = { y: +yy, m: +mm, paid: 0, free: 0, count: 0 };
-    months[mk].paid += x.paid; months[mk].free += x.free; months[mk].count += 1;
-  }
-  const mkeys = Object.keys(months).sort();
-  if (mkeys.length) {
-    let msg = `📊 ИТОГО ПО МЕСЯЦАМ (на ${pad(now.getDate())}.${pad(now.getMonth() + 1)})`;
-    for (const mk of mkeys) {
-      const x = months[mk];
-      const po = pm[mk];
-      const dp = dstr(x.paid - (po ? po.paid : x.paid));
-      const df = dstr(x.free - (po ? po.free : x.free));
-      const dc = dstr(x.count - (po ? po.count : x.count));
-      msg += `\n\n${MN[x.m]} ${x.y}\n🎫 Продано: ${fmt(x.paid)}${po ? dp : ''}\n🎟️ Пригласительных: ${fmt(x.free)}${po ? df : ''}\n🎪 Мероприятий: ${fmt(x.count)}${po ? dc : ''}`;
-    }
-    await tg(msg);
-  }
-
+  // Сообщение «ИТОГО ПО МЕСЯЦАМ» убрано по просьбе пользователя (не нужно) — 07.09.
   const snapEvents = {};
   for (const k of keys) {
     const x = events[k];
@@ -383,12 +361,16 @@ function deltaStr(cur, prior) {
     // именно сегодня, или оно уже было показано раньше) — так следующая неделя его не покажет.
     snapEvents[k] = { paid: x.paid, free: x.free, reported: isFinished };
   }
-  const snapMonths = {};
-  for (const mk of mkeys) { const x = months[mk]; snapMonths[mk] = { paid: x.paid, free: x.free, count: x.count }; }
   if ((process.env.DRY_RUN || '') === '1') {
     console.error('[debug] DRY_RUN — snapshot-weekly.json НЕ перезаписан');
   } else {
-    fs.writeFileSync(SNAP_FILE, JSON.stringify({ date: dateStr, events: snapEvents, months: snapMonths }, null, 2));
+    fs.writeFileSync(SNAP_FILE, JSON.stringify({ date: dateStr, events: snapEvents }, null, 2));
+  }
+  // Кеш города по площадкам обновляем всегда (даже в DRY_RUN) — он не влияет на текст отчёта
+  // и на дельты между неделями, только экономит запросы к /halls/ в следующий раз.
+  if (venueCacheDirty) {
+    try { fs.writeFileSync(VENUE_CACHE_FILE, JSON.stringify(venueCityCache, null, 2)); }
+    catch (e) { console.error('[debug] не удалось сохранить venue-city-cache.json:', e.message || e); }
   }
   console.log(`OK: кабинетов ${cabs.length}, мероприятий ${keys.length} (в продаже ${onSale}, завершено ${finished})`);
 })().catch(e => { console.error(e.message || e); process.exit(1); });
