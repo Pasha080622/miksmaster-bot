@@ -90,6 +90,13 @@ let venueCityCache = {};
 try { venueCityCache = JSON.parse(fs.readFileSync(VENUE_CACHE_FILE, 'utf8')); } catch { /* нет файла — начнём с пустого */ }
 let venueCacheDirty = false;
 
+// В CMS у Павла встречаются залы-дубли: несколько записей с ОДИНАКОВЫМ названием площадки,
+// но разными id и разными городами (напр. «Руки Вверх! Бар» — сразу 3 таких записи). По одному
+// названию их не различить, поэтому если совпадений несколько и города расходятся — город
+// оставляем пустым (лучше пусто, чем неверно) и запоминаем площадку в ambiguousVenues, чтобы
+// вывести список Павлу для ручной проверки/переименования дублей в CMS.
+const ambiguousVenues = [];
+
 async function fetchVenueCity(venueName) {
   if (!venueName) return '';
   if (Object.prototype.hasOwnProperty.call(venueCityCache, venueName)) return venueCityCache[venueName];
@@ -97,14 +104,22 @@ async function fetchVenueCity(venueName) {
   try {
     const r = await get(`/halls/?_q=${encodeURIComponent(venueName)}`);
     const re = /href="edit\?id=(\d+)" class="js-venue-item"[^>]*>([^<]*)<\/a>/g;
-    let m, id = null;
+    let m;
+    const ids = [];
     while ((m = re.exec(r.body))) {
-      if (m[2].trim() === venueName) { id = m[1]; break; } // точное совпадение названия, не первое попавшееся
+      if (m[2].trim() === venueName) ids.push(m[1]); // точное совпадение названия — таких может быть несколько (дубли в CMS)
     }
-    if (id) {
+    const cities = new Set();
+    for (const id of ids) {
       const r2 = await get(`/halls/edit?id=${id}`);
       const cm = r2.body.match(/Город<\/label>\s*<div[^>]*>\s*<span>([^<]*)<\/span>/);
-      if (cm) city = cm[1].trim();
+      if (cm && cm[1].trim()) cities.add(cm[1].trim());
+    }
+    if (cities.size === 1) {
+      city = [...cities][0];
+    } else if (cities.size > 1) {
+      city = '';
+      ambiguousVenues.push({ venue: venueName, cities: [...cities] });
     }
   } catch { /* сеть подвела — не критично, город останется пустым в этот раз */ }
   venueCityCache[venueName] = city;
@@ -371,6 +386,12 @@ function deltaStr(cur, prior) {
   if (venueCacheDirty) {
     try { fs.writeFileSync(VENUE_CACHE_FILE, JSON.stringify(venueCityCache, null, 2)); }
     catch (e) { console.error('[debug] не удалось сохранить venue-city-cache.json:', e.message || e); }
+  }
+  // Площадки-дубли (одинаковое название, разные города в CMS) — город не показан, т.к. не различить.
+  // Список — только в лог, Павлу для ручной проверки/переименования дублей в разделе «Залы».
+  if (ambiguousVenues.length) {
+    console.error('[warn] город не определён однозначно (в CMS несколько залов с одинаковым названием, но разными городами):');
+    for (const a of ambiguousVenues) console.error(`  - "${a.venue}": ${a.cities.join(' / ')}`);
   }
   console.log(`OK: кабинетов ${cabs.length}, мероприятий ${keys.length} (в продаже ${onSale}, завершено ${finished})`);
 })().catch(e => { console.error(e.message || e); process.exit(1); });
