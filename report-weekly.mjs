@@ -264,22 +264,31 @@ async function orgs() {
 // показа). Ключ «имя|дата» без времени схлопывал их в одну запись, и один из показов молча пропадал
 // или получал чужие цифры. Поэтому ключ везде (здесь, в evData и soldVenues) строится как
 // «имя|дата|время», а не «имя|дата».
+// Возвращает { active, ids }: active — как раньше, множество ключей «в продаже» (не закрыто/архив);
+// ids — карта ключ → [event_id,...], собранная из ссылки /repertoire/events/edit?id=N в 1-й колонке
+// (нужна, чтобы потом дёрнуть отчёт «по секторам» — см. sectorCategoryTotals). Собираем id ПО ВСЕМ
+// строкам (не только «активным») — так же, как evData() (ext=1) суммирует продажи по ключу без
+// разбора статуса, чтобы разбивка по категориям била ровно в тот же 🎫-итог.
 async function activeSet(oid) {
   const r = await get(`/reports/tickets/organizer?report=1&event_date_from=${FROM}&event_date_to=${TO}&organizer_id=${oid}&ext=0`);
   if (looksLikeLogin(r)) throw new Error('AUTH_FAILED: не залогинен (ext=0)');
   const $ = cheerio.load(r.body);
   const s = new Set();
+  const ids = {};
   $('table tr').each((_, tr) => {
     const c = $(tr).find('td');
     if (c.length < 15) return;
     const dt = $(c[1]).text().trim();
     if (!/^\d{2}\.\d{2}\.\d{4}/.test(dt)) return;
-    if ($(c[2]).text().trim() !== '') return; // непустая колонка = закрыто/архив
     const name = $(c[0]).text().replace(/\s+/g, ' ').trim();
     const [date, time] = dt.split(' ');
-    s.add(`${name}|${date}|${time || ''}`);
+    const key = `${name}|${date}|${time || ''}`;
+    if ($(c[2]).text().trim() === '') s.add(key); // непустая колонка = закрыто/архив
+    const href = $(c[0]).find('a').attr('href') || '';
+    const m = href.match(/id=(\d+)/);
+    if (m) (ids[key] || (ids[key] = [])).push(m[1]);
   });
-  return s;
+  return { active: s, ids };
 }
 
 // --- билеты/пригласительные/выручка по мероприятиям организатора ---
@@ -309,6 +318,81 @@ async function evData(oid) {
     }
   });
   return Object.values(acc);
+}
+
+// --- разбивка продаж по секторам для ОДНОГО конкретного «Событие» (event_id) ---
+// Найдено 14.09 по показу Павла: кабинет → Отчеты → Билеты → «По событию» → конкретное событие →
+// Детализация «По секторам» — это отдельная форма /reports/tickets/event?form, а сам отчёт (как и
+// у «По событию»/organizer) строится GET-запросом report=1&event_id=<id>&ext=1 (ext=1 = «По секторам»,
+// см. <select name="ext"> в форме: 0=Общий отчёт, 1=По секторам, 2=По агентам, ...). В отличие от
+// уже использовавшегося /reports/tickets/organizer?...&ext=1 (там «ext=1» — просто расширенные
+// столбцы БЕЗ названия сектора, только цена), здесь одна HTML-таблица явно группирует строки по
+// сектору: строка-заголовок сектора (1 ячейка, текст — «VIP 2», «Танцпол», «Столы», «Балкон. Левая
+// сторона» и т.п.), затем 1+ строк по ценовым градациям этого сектора (1-я ячейка — цена, непустая),
+// затем строка-подытог сектора (1-я ячейка ПУСТАЯ, остальные — суммы по всем ценам сектора), затем
+// пустая строка-разделитель. В самом конце таблицы — ОБЩИЙ итог по событию (тоже 1-я ячейка пустая),
+// но перед ним уже нет строки-заголовка сектора — поэтому отличаем «подытог сектора» от «общего
+// итога» состоянием curSector: сразу после того как забрали подытог текущего сектора, обнуляем
+// curSector, и следующая строка с пустой 1-й ячейкой (это и есть общий итог) уже не попадёт в sectors.
+// Колонки те же, что и у /organizer: Цена | Получено | Возвращено квоты | Свободно | Забронировано |
+// У агента | В абонементе | Продано | Скидка | Возвращено | ИТОГО — каждая (кроме Цены) в 2 столбца
+// (Билетов, Сумма). «Продано» — 7-я по счёту пара после Цены, т.е. индексы 13(Билетов) и 14(Сумма)
+// в плоском массиве ячеек строки (0=Цена, 1-2=Получено, 3-4=Возвращено квоты, 5-6=Свободно,
+// 7-8=Забронировано, 9-10=У агента, 11-12=В абонементе, 13-14=Продано, 15-16=Скидка, 17-18=Возвращено,
+// 19-20=ИТОГО) — именно она нужна для разбивки по категориям (танцпол/VIP/посадка).
+async function sectorCategoryTotals(eventId) {
+  const r = await get(`/reports/tickets/event?report=1&event_id=${eventId}&ext=1`);
+  if (looksLikeLogin(r)) throw new Error('AUTH_FAILED: не залогинен (sector report)');
+  const $ = cheerio.load(r.body);
+  let curSector = null;
+  const sectors = [];
+  $('table').first().find('tr').each((_, tr) => {
+    const c = $(tr).find('td,th');
+    if (c.length === 1) {
+      const t = $(c[0]).text().replace(/\s+/g, ' ').trim();
+      if (t) curSector = t;
+      return;
+    }
+    if (c.length < 2) return;
+    const v = c.map((i, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
+    if (v[0] === '' && curSector) {
+      const bil = parseInt((v[13] || '0').replace(/[^\d-]/g, '')) || 0;
+      const sum = parseInt((v[14] || '0').replace(/[^\d-]/g, '')) || 0;
+      sectors.push({ name: curSector, bil, sum });
+      curSector = null; // следующая строка с пустой 1-й ячейкой — уже общий итог по событию, не сектор
+    }
+  });
+  return sectors;
+}
+
+// Категория по названию сектора: танцпол/VIP — по сути всегда отдельный именованный сектор
+// (распознаём по подстроке), всё остальное — «посадка» (так и просил Павел: «по сути это все
+// остальные категории»). «other» оставлена про запас (сейчас всегда 0) — вдруг понадобится более
+// тонкое разделение внутри «остальных» категорий.
+function sectorCategory(name) {
+  const n = name.toLowerCase();
+  if (n.includes('танц')) return 'dance';
+  if (n.includes('vip') || n.includes('вип')) return 'vip';
+  return 'seat';
+}
+
+// Суммирует категории по ВСЕМ event_id одного ключа (имя|дата|время) — событие может быть
+// представлено НЕСКОЛЬКИМИ отдельными записями «Событие» с одинаковым названием/датой/временем
+// (см. комментарий у activeSet ниже про «Леша Свик / все хиты! 25.10.2026 19:30» — 2 записи:
+// закрытая и активная), и evData()/🎫-итог по этому ключу уже суммирует продажи по ВСЕМ таким
+// записям — чтобы разбивка по категориям била в ту же сумму, здесь суммируем так же.
+async function categoryTotals(eventIds) {
+  const cat = { dance: { bil: 0, sum: 0 }, vip: { bil: 0, sum: 0 }, seat: { bil: 0, sum: 0 }, other: { bil: 0, sum: 0 } };
+  for (const id of eventIds) {
+    let sectors;
+    try { sectors = await sectorCategoryTotals(id); }
+    catch (e) { console.error(`[debug] отчёт по секторам event_id=${id}: ${e.message || e}`); continue; }
+    for (const s of sectors) {
+      const c = sectorCategory(s.name);
+      cat[c].bil += s.bil; cat[c].sum += s.sum;
+    }
+  }
+  return cat;
 }
 
 // --- зал/площадка + время начала из отчёта «События в продаже» (по кабинету целиком) ---
@@ -365,6 +449,14 @@ function deltaStr(cur, prior) {
   else if (cur > 0) s += ' с нуля';
   return s + ')';
 }
+// То же самое, но БЕЗ процента — только в штуках (для строк по категориям 💃/🔝/🪑: Павел явно
+// попросил «% прироста билетов - не надо показывать»; проценты только у сводной строки 🎫 выше).
+function deltaUnitsStr(cur, prior) {
+  if (typeof prior !== 'number') return ' (новое)';
+  const d = cur - prior;
+  if (d === 0) return ' (0)';
+  return ` (${d > 0 ? '+' : '-'}${fmt(Math.abs(d))})`;
+}
 
 (async () => {
   await get('/');
@@ -372,6 +464,7 @@ function deltaStr(cur, prior) {
   if (!cabs.length) throw new Error('Список кабинетов пуст (кука протухла?)');
 
   const events = {}; // key -> {name,date,paid,free,venue,hall,cabinet}
+  const eventIdsByKey = {}; // key -> [event_id,...] — для отчёта «по секторам» (разбивка по категориям)
   for (const cab of cabs) {
     await get('/city?id=' + cab.id);
     let oids;
@@ -380,7 +473,9 @@ function deltaStr(cur, prior) {
     const act = new Set();
     let evs = [];
     for (const oid of oids) {
-      (await activeSet(oid)).forEach(x => act.add(x));
+      const as = await activeSet(oid);
+      as.active.forEach(x => act.add(x));
+      for (const [k, v] of Object.entries(as.ids)) { (eventIdsByKey[k] || (eventIdsByKey[k] = [])).push(...v); }
       evs = evs.concat(await evData(oid));
     }
     let venues = {};
@@ -478,12 +573,38 @@ function deltaStr(cur, prior) {
     const countLine = isFinished
       ? `🏁 ИТОГ: 🎫 ${fmt(x.paid)}${d}`
       : `🎫 ${fmt(x.paid)}${d}`;
+
+    // Разбивка по категориям (💃 танцпол / 🔝 VIP / 🪑 посадка) — прототип по просьбе Павла (14.09):
+    // берём event_id этого мероприятия (может быть несколько на один ключ, см. eventIdsByKey/activeSet)
+    // и суммируем продажи по секторам через отчёт «По событию → По секторам». Строку категории
+    // показываем, только если по ней реально что-то продано (пустые категории не нужны — напр. у
+    // события «только посадка» не будет строк 💃/🔝 вовсе). Дельта — только в штуках, без процента
+    // (Павел: «% прироста билетов - не надо показывать»). 🎫-итог выше эту разбивку не учитывает и
+    // считается как раньше — по всем категориям сразу.
+    let catLines = '';
+    const priorCat = (prior && prior.cats) || {};
+    try {
+      const ids = eventIdsByKey[k] || [];
+      if (ids.length) {
+        const cat = await categoryTotals(ids);
+        x.cats = cat; // сохраняем в снапшот — нужно для дельты на следующей неделе
+        const parts = [];
+        if (cat.dance.bil > 0) parts.push(`💃 ${fmt(cat.dance.bil)} (${fmt(cat.dance.sum)} ₽)${deltaUnitsStr(cat.dance.bil, priorCat.dance ? priorCat.dance.bil : undefined)}`);
+        if (cat.vip.bil > 0) parts.push(`🔝 ${fmt(cat.vip.bil)} (${fmt(cat.vip.sum)} ₽)${deltaUnitsStr(cat.vip.bil, priorCat.vip ? priorCat.vip.bil : undefined)}`);
+        if (cat.seat.bil > 0) parts.push(`🪑 ${fmt(cat.seat.bil)} (${fmt(cat.seat.sum)} ₽)${deltaUnitsStr(cat.seat.bil, priorCat.seat ? priorCat.seat.bil : undefined)}`);
+        if (cat.other.bil > 0) parts.push(`Другое: ${fmt(cat.other.bil)} (${fmt(cat.other.sum)} ₽)${deltaUnitsStr(cat.other.bil, priorCat.other ? priorCat.other.bil : undefined)}`);
+        if (parts.length) catLines = '\n' + parts.join('\n');
+      }
+    } catch (e) {
+      console.error(`[debug] разбивка по категориям "${x.name}" (${x.date} ${x.time}): ${e.message || e}`);
+    }
+
     const freeLine = x.free ? `\n🎟️ Пригласительных: ${fmt(x.free)}` : '';
     // Дата с временем — если в этот день у мероприятия несколько разных показов (напр. «Моя Мишель»
     // 26.09 в 19:00 и 19:30 — это два разных концерта), без времени их было бы не отличить в тексте.
     const dateLine = x.time ? `${x.date} ${x.time}` : x.date;
     blocks.push(
-      `${statusLine}\n${cityLine}${x.venue ? x.venue + '\n' : ''}${dateLine}\n${countLine}${freeLine}`
+      `${statusLine}\n${cityLine}${x.venue ? x.venue + '\n' : ''}${dateLine}\n${countLine}${catLines}${freeLine}`
     );
   }
 
@@ -508,7 +629,9 @@ function deltaStr(cur, prior) {
     const isFinished = !x.active || evKey < todayKey;
     // reported:true — событие уже завершено (независимо от того, показывали ли мы его в блоках
     // именно сегодня, или оно уже было показано раньше) — так следующая неделя его не покажет.
-    snapEvents[k] = { paid: x.paid, free: x.free, reported: isFinished };
+    // cats — снимок разбивки по категориям (💃/🔝/🪑), если успели её посчитать в этот раз (см. цикл
+    // выше) — нужен, чтобы на следующей неделе показать дельту по штукам для каждой категории.
+    snapEvents[k] = { paid: x.paid, free: x.free, reported: isFinished, cats: x.cats };
   }
   if ((process.env.DRY_RUN || '') === '1') {
     console.error('[debug] DRY_RUN — snapshot-weekly.json НЕ перезаписан');
