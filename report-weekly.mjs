@@ -175,16 +175,39 @@ async function fetchVenueCity(cabinetId, venueName) {
   }
   const result = { city: '', candidates: [] };
   try {
-    const r = await get(`/halls/?_q=${encodeURIComponent(venueName)}`);
-    const re = /href="edit\?id=(\d+)" class="js-venue-item"[^>]*>([^<]*)<\/a>/g;
-    let m;
+    // НАЙДЕНО 14.09 (Павел показал зал id=54173154 «Руки Вверх! Бар (Иваново)» — там прямо в
+    // карточке видно «Город: Иваново», и он справедливо спросил, почему скрипт всё равно не смог
+    // определить город). Разобрался — две отдельные ошибки в этой функции:
+    //
+    // 1) /halls/?_q= — результат постраничный (по 25 штук), а мы читали только 1-ю страницу. У
+    //    Павла в кабинете «ООО МИКСМАСТЕР (УК)» под запрос «Руки Вверх! Бар» попадает 33 зала —
+    //    3-й странице ничего не гарантировано, часть залов просто не долетала до кода.
+    // 2) Ссылка на зал в списке результатов показывает «Сокращённое название» (name_short_ru), а
+    //    не «Название» (name_ru) — и у части залов эти два поля заведены по-разному: например,
+    //    у ивановского «Руки Вверх! Бар» Название = "Руки Вверх! Бар" (точно как баннер в отчёте
+    //    о продажах), а Сокращённое название = "Руки Вверх! Бар (Иваново)". Старое сравнение
+    //    `m[2].trim() === venueName` сверяло venueName именно с Сокращённым названием — поэтому
+    //    ивановский зал молча отбрасывался как «не совпадающий», а вместо него подбирались 3
+    //    случайных других зала (Новосибирск×2, Волгоград), у которых как раз Сокращённое название
+    //    пустое/бэйр. Теперь: (а) читаем все страницы поиска, (б) для каждого найденного id
+    //    сравниваем venueName И с name_ru, И с name_short_ru — совпадение по любому из двух полей
+    //    считается совпадением.
     const ids = [];
-    while ((m = re.exec(r.body))) {
-      if (m[2].trim() === venueName) ids.push(m[1]); // точное совпадение названия — таких может быть несколько (дубли в CMS, в том числе внутри одного кабинета)
+    for (let page = 1; page <= 6; page++) {
+      const r = await get(`/halls/?_q=${encodeURIComponent(venueName)}&page=${page}`);
+      const re = /href="edit\?id=(\d+)" class="js-venue-item"[^>]*>/g;
+      let m;
+      let found = 0;
+      while ((m = re.exec(r.body))) { ids.push(m[1]); found++; }
+      if (found < 25) break; // последняя страница
     }
     const cities = new Set();
     for (const id of ids) {
       const r2 = await get(`/halls/edit?id=${id}`);
+      const nameM = r2.body.match(/name="name_ru"[^>]*value="([^"]*)"/);
+      const shortM = r2.body.match(/name="name_short_ru"[^>]*value="([^"]*)"/);
+      const matches = (nameM && nameM[1].trim() === venueName) || (shortM && shortM[1].trim() === venueName);
+      if (!matches) continue;
       const cm = r2.body.match(/Город<\/label>\s*<div[^>]*>\s*<span>([^<]*)<\/span>/);
       if (cm && cm[1].trim()) cities.add(cm[1].trim());
     }
