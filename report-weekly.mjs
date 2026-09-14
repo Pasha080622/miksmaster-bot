@@ -85,9 +85,30 @@ const TO = `${pad(t2.getDate())}.${pad(t2.getMonth() + 1)}.${t2.getFullYear()}`;
 // а сама страница `/halls/edit?id=ID` уже отдаёт «Город» открытым текстом в <span>. Результаты
 // кешируются в venue-city-cache.json, чтобы не дёргать /halls/ на каждый запуск ради одних и тех же
 // ~60-90 площадок недели.
+//
+// ВАЖНО (баг найден 26.09 по жалобе Павла — «Руки Вверх! Бар» в отчёте показывал Ярославль для
+// событий, которые реально шли в Перми/Екатеринбурге): сеть «Руки Вверх! Бар» — это МНОЖЕСТВО
+// разных кабинетов (юрлиц), по одному на город, и у КАЖДОГО в /halls/ может быть СВОЙ зал с БУКВАЛЬНО
+// одинаковым названием «Руки Вверх! Бар» (без города в названии — в отличие от «Руки Вверх! Бар
+// Таганка» и т.п., которые этой проблеме не подвержены). Поиск `/halls/?_q=` при этом всегда видит
+// только зал ТЕКУЩЕГО активного кабинета — сам по себе не путает города. Но кэш ниже был ключом
+// ТОЛЬКО по названию площадки, без привязки к кабинету — поэтому первый же кабинет с залом
+// «Руки Вверх! Бар» (по порядку обхода cabs) записывал в кэш «Руки Вверх! Бар → <свой город>», и
+// этот же (уже чужой) город молча подставлялся ВСЕМ остальным кабинетам с залом того же названия —
+// без единого предупреждения, т.к. каждый отдельный `/halls/?_q=` запрос видел только «свой» зал
+// и не подозревал о дублях в других кабинетах. Фикс — ключ кэша теперь пара (id кабинета + название
+// площадки), а не одно название; см. fetchVenueCity() ниже.
 const VENUE_CACHE_FILE = 'venue-city-cache.json';
 let venueCityCache = {};
 try { venueCityCache = JSON.parse(fs.readFileSync(VENUE_CACHE_FILE, 'utf8')); } catch { /* нет файла — начнём с пустого */ }
+// Старые записи (до фикса от 26.09) были ключом просто по названию площадки, без кабинета — такой
+// кэш мог содержать «отравленные» между кабинетами города (см. комментарий выше) и с новым форматом
+// ключа `${cabinetId}|${venueName}` всё равно не совпадёт ни с одним новым ключом, так что технически
+// не мешал бы. Но на всякий случай выбрасываем такие ключи явно (ключ без «|» = старый формат), чтобы
+// файл не тащил в себе неиспользуемый мусор.
+for (const k of Object.keys(venueCityCache)) {
+  if (!k.includes('|')) delete venueCityCache[k];
+}
 let venueCacheDirty = false;
 
 // В CMS у Павла встречаются залы-дубли: несколько записей с ОДИНАКОВЫМ названием площадки,
@@ -142,10 +163,14 @@ async function disambiguateByComment(cabinetId, eventName, candidateCities) {
 // список городов-кандидатов (площадка-дубль), которые может попробовать разрешить вызывающий код
 // через disambiguateByComment (для этого нужны кабинет и название мероприятия — их знает только
 // основной цикл, а не эта функция, поэтому окончательное решение принимается там).
-async function fetchVenueCity(venueName) {
+async function fetchVenueCity(cabinetId, venueName) {
   if (!venueName) return { city: '', candidates: [] };
-  if (Object.prototype.hasOwnProperty.call(venueCityCache, venueName)) {
-    const cached = venueCityCache[venueName];
+  // Ключ кэша — ОБЯЗАТЕЛЬНО кабинет+площадка, а не одна площадка (см. комментарий выше):
+  // `/halls/?_q=` физически ищет только среди залов ТЕКУЩЕГО активного кабинета, так что один и тот
+  // же ключ-строка «Руки Вверх! Бар» в разных кабинетах — это РАЗНЫЕ залы с разными городами.
+  const cacheKey = `${cabinetId}|${venueName}`;
+  if (Object.prototype.hasOwnProperty.call(venueCityCache, cacheKey)) {
+    const cached = venueCityCache[cacheKey];
     return typeof cached === 'string' ? { city: cached, candidates: [] } : cached;
   }
   const result = { city: '', candidates: [] };
@@ -155,7 +180,7 @@ async function fetchVenueCity(venueName) {
     let m;
     const ids = [];
     while ((m = re.exec(r.body))) {
-      if (m[2].trim() === venueName) ids.push(m[1]); // точное совпадение названия — таких может быть несколько (дубли в CMS)
+      if (m[2].trim() === venueName) ids.push(m[1]); // точное совпадение названия — таких может быть несколько (дубли в CMS, в том числе внутри одного кабинета)
     }
     const cities = new Set();
     for (const id of ids) {
@@ -166,7 +191,7 @@ async function fetchVenueCity(venueName) {
     if (cities.size === 1) result.city = [...cities][0];
     else if (cities.size > 1) result.candidates = [...cities];
   } catch { /* сеть подвела — не критично, город останется пустым в этот раз */ }
-  venueCityCache[venueName] = result;
+  venueCityCache[cacheKey] = result;
   venueCacheDirty = true;
   return result;
 }
@@ -332,7 +357,7 @@ function deltaStr(cur, prior) {
       // Из-за этого завершённые концерты вообще никогда не попадали в отчёт. Теперь оставляем
       // все события из evData, а через act.has(key) только помечаем «завершено/в продаже».
       const v = venues[key] || {};
-      const vc = await fetchVenueCity(v.venue);
+      const vc = await fetchVenueCity(cab.id, v.venue);
       let city = vc.city;
       if (!city && vc.candidates.length > 1) {
         city = await disambiguateByComment(cab.id, e.name, vc.candidates);
