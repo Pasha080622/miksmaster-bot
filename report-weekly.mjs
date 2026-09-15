@@ -597,11 +597,13 @@ function deltaUnitsStr(cur, prior) {
       if (ids.length) {
         const cat = await categoryTotals(ids);
         x.cats = cat; // сохраняем в снапшот — нужно для дельты на следующей неделе
+        // Павел (15.09): сумму в рублях по категориям убрать — только кол-во + прирост в штуках,
+        // как у остальных строк (без суммы, без процента).
         const parts = [];
-        if (cat.dance.bil > 0) parts.push(`💃 ${fmt(cat.dance.bil)} (${fmt(cat.dance.sum)} ₽)${deltaUnitsStr(cat.dance.bil, priorCat.dance ? priorCat.dance.bil : undefined)}`);
-        if (cat.vip.bil > 0) parts.push(`🔝 ${fmt(cat.vip.bil)} (${fmt(cat.vip.sum)} ₽)${deltaUnitsStr(cat.vip.bil, priorCat.vip ? priorCat.vip.bil : undefined)}`);
-        if (cat.seat.bil > 0) parts.push(`🪑 ${fmt(cat.seat.bil)} (${fmt(cat.seat.sum)} ₽)${deltaUnitsStr(cat.seat.bil, priorCat.seat ? priorCat.seat.bil : undefined)}`);
-        if (cat.other.bil > 0) parts.push(`Другое: ${fmt(cat.other.bil)} (${fmt(cat.other.sum)} ₽)${deltaUnitsStr(cat.other.bil, priorCat.other ? priorCat.other.bil : undefined)}`);
+        if (cat.dance.bil > 0) parts.push(`💃 ${fmt(cat.dance.bil)}${deltaUnitsStr(cat.dance.bil, priorCat.dance ? priorCat.dance.bil : undefined)}`);
+        if (cat.vip.bil > 0) parts.push(`🔝 ${fmt(cat.vip.bil)}${deltaUnitsStr(cat.vip.bil, priorCat.vip ? priorCat.vip.bil : undefined)}`);
+        if (cat.seat.bil > 0) parts.push(`🪑 ${fmt(cat.seat.bil)}${deltaUnitsStr(cat.seat.bil, priorCat.seat ? priorCat.seat.bil : undefined)}`);
+        if (cat.other.bil > 0) parts.push(`Другое: ${fmt(cat.other.bil)}${deltaUnitsStr(cat.other.bil, priorCat.other ? priorCat.other.bil : undefined)}`);
         if (parts.length) catLines = '\n' + parts.join('\n');
       }
     } catch (e) {
