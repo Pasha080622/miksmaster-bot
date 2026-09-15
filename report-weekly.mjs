@@ -444,22 +444,11 @@ async function tg(text) {
 }
 
 const fmt = n => n.toLocaleString('ru-RU');
-const dstr = d => d === 0 ? ' (0)' : ` (${d > 0 ? '+' : '-'}${fmt(Math.abs(d))})`;
-// Дельта+% ОДНОЙ скобкой, как в реальном отчёте: "94 (+20 / +27%)", "17 (+17 с нуля)", "0 (0)".
+// Дельта БЕЗ процента — только в штуках (Павел, 15.09: «% прироста билетов - не надо показывать»
+// касается ВСЕХ строк с дельтой, включая сводную 🎫, а не только категорий 💃/🔝/🪑 — исходно тут
+// был отдельный deltaStr() с процентом для 🎫, но по факту он больше нигде не нужен).
 // prior === undefined — истории по этому событию ещё нет (первое появление в отчёте) →
 // показываем «(новое)», а не пустоту — так «0 (новое)» и «0 (0)» всегда различимы.
-function deltaStr(cur, prior) {
-  if (typeof prior !== 'number') return ' (новое)';
-  const d = cur - prior;
-  if (d === 0) return ' (0)';
-  const sign = d > 0 ? '+' : '-';
-  let s = ` (${sign}${fmt(Math.abs(d))}`;
-  if (prior > 0) s += ` / ${sign}${Math.round(Math.abs(d) / prior * 100)}%`;
-  else if (cur > 0) s += ' с нуля';
-  return s + ')';
-}
-// То же самое, но БЕЗ процента — только в штуках (для строк по категориям 💃/🔝/🪑: Павел явно
-// попросил «% прироста билетов - не надо показывать»; проценты только у сводной строки 🎫 выше).
 function deltaUnitsStr(cur, prior) {
   if (typeof prior !== 'number') return ' (новое)';
   const d = cur - prior;
@@ -566,7 +555,7 @@ function deltaUnitsStr(cur, prior) {
     totalPaid += x.paid; totalFree += x.free;
 
     const prior = pe[k];
-    const d = deltaStr(x.paid, prior ? prior.paid : undefined);
+    const d = deltaUnitsStr(x.paid, prior ? prior.paid : undefined);
 
     // Завершённые мероприятия показываем В СООБЩЕНИИ только ОДИН раз — в ту неделю, когда они
     // впервые стали «Завершён» (как раньше в старом скрипте). В снапшоте помечаем reported:true,
