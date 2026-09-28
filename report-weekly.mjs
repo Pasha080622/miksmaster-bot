@@ -36,7 +36,10 @@ function mergeSetCookie(res) {
     const kv = part.split(';')[0].trim();
     if (/^[^=]+=/.test(kv)) {
       const name = kv.split('=')[0];
-      cookie = cookie.replace(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=[^;]*'), '').replace(/^; /, '').trim();
+      cookie = cookie
+        .replace(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=[^;]*'), '')
+        .replace(/^; /, '')
+        .trim();
       cookie = (cookie ? cookie + '; ' : '') + kv;
     }
   }
@@ -44,9 +47,9 @@ function mergeSetCookie(res) {
 async function get(path) {
   const res = await fetch(BASE + path, {
     headers: {
-      'Cookie': cookie,
+      Cookie: cookie,
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml',
+      Accept: 'text/html,application/xhtml+xml',
       'Accept-Language': 'ru-RU,ru;q=0.9',
     },
     redirect: 'manual',
@@ -57,7 +60,7 @@ async function get(path) {
 }
 async function getJson(path) {
   const res = await fetch(BASE + path, {
-    headers: { 'Cookie': cookie, 'Accept': 'application/json' },
+    headers: { Cookie: cookie, Accept: 'application/json' },
   });
   mergeSetCookie(res);
   return res.json();
@@ -100,7 +103,11 @@ const TO = `${pad(t2.getDate())}.${pad(t2.getMonth() + 1)}.${t2.getFullYear()}`;
 // площадки), а не одно название; см. fetchVenueCity() ниже.
 const VENUE_CACHE_FILE = 'venue-city-cache.json';
 let venueCityCache = {};
-try { venueCityCache = JSON.parse(fs.readFileSync(VENUE_CACHE_FILE, 'utf8')); } catch { /* нет файла — начнём с пустого */ }
+try {
+  venueCityCache = JSON.parse(fs.readFileSync(VENUE_CACHE_FILE, 'utf8'));
+} catch {
+  /* нет файла — начнём с пустого */
+}
 // Старые записи (до фикса от 26.09) были ключом просто по названию площадки, без кабинета — такой
 // кэш мог содержать «отравленные» между кабинетами города (см. комментарий выше) и с новым форматом
 // ключа `${cabinetId}|${venueName}` всё равно не совпадёт ни с одним новым ключом, так что технически
@@ -130,7 +137,11 @@ async function fetchActivities(cabinetId) {
   const rows = [];
   for (let page = 1; page <= 12; page++) {
     let r;
-    try { r = await get(`/repertoire/activities/?page=${page}`); } catch { break; }
+    try {
+      r = await get(`/repertoire/activities/?page=${page}`);
+    } catch {
+      break;
+    }
     const $ = cheerio.load(r.body);
     let found = 0;
     $('table tr').each((_, tr) => {
@@ -138,7 +149,10 @@ async function fetchActivities(cabinetId) {
       if (tds.length >= 2) {
         const name = $(tds[0]).text().replace(/\s+/g, ' ').trim();
         const comment = $(tds[1]).text().replace(/\s+/g, ' ').trim();
-        if (name) { rows.push({ name, comment }); found++; }
+        if (name) {
+          rows.push({ name, comment });
+          found++;
+        }
       }
     });
     if (found < 25) break; // страница неполная — дальше страниц нет
@@ -152,10 +166,12 @@ async function disambiguateByComment(cabinetId, eventName, candidateCities) {
     const rows = await fetchActivities(cabinetId);
     for (const r of rows) {
       if (r.name !== eventName || !r.comment) continue;
-      const hit = candidateCities.filter((c) => r.comment.includes(c));
+      const hit = candidateCities.filter(c => r.comment.includes(c));
       if (hit.length === 1) return hit[0];
     }
-  } catch { /* сеть подвела — не критично, город останется пустым */ }
+  } catch {
+    /* сеть подвела — не критично, город останется пустым */
+  }
   return '';
 }
 
@@ -180,18 +196,18 @@ async function fetchVenueCity(cabinetId, venueName) {
     // определить город). Разобрался — две отдельные ошибки в этой функции:
     //
     // 1) /halls/?_q= — результат постраничный (по 25 штук), а мы читали только 1-ю страницу. У
-    //    Павла в кабинете «ООО МИКСМАСТЕР (УК)» под запрос «Руки Вверх! Бар» попадает 33 зала —
-    //    3-й странице ничего не гарантировано, часть залов просто не долетала до кода.
+    // Павла в кабинете «ООО МИКСМАСТЕР (УК)» под запрос «Руки Вверх! Бар» попадает 33 зала —
+    // 3-й странице ничего не гарантировано, часть залов просто не долетала до кода.
     // 2) Ссылка на зал в списке результатов показывает «Сокращённое название» (name_short_ru), а
-    //    не «Название» (name_ru) — и у части залов эти два поля заведены по-разному: например,
-    //    у ивановского «Руки Вверх! Бар» Название = "Руки Вверх! Бар" (точно как баннер в отчёте
-    //    о продажах), а Сокращённое название = "Руки Вверх! Бар (Иваново)". Старое сравнение
-    //    `m[2].trim() === venueName` сверяло venueName именно с Сокращённым названием — поэтому
-    //    ивановский зал молча отбрасывался как «не совпадающий», а вместо него подбирались 3
-    //    случайных других зала (Новосибирск×2, Волгоград), у которых как раз Сокращённое название
-    //    пустое/бэйр. Теперь: (а) читаем все страницы поиска, (б) для каждого найденного id
-    //    сравниваем venueName И с name_ru, И с name_short_ru — совпадение по любому из двух полей
-    //    считается совпадением.
+    // не «Название» (name_ru) — и у части залов эти два поля заведены по-разному: например,
+    // у ивановского «Руки Вверх! Бар» Название = "Руки Вверх! Бар" (точно как баннер в отчёте
+    // о продажах), а Сокращённое название = "Руки Вверх! Бар (Иваново)". Старое сравнение
+    // `m[2].trim() === venueName` сверяло venueName именно с Сокращённым названием — поэтому
+    // ивановский зал молча отбрасывался как «не совпадающий», а вместо него подбирались 3
+    // случайных других зала (Новосибирск×2, Волгоград), у которых как раз Сокращённое название
+    // пустое/бэйр. Теперь: (а) читаем все страницы поиска, (б) для каждого найденного id
+    // сравниваем venueName И с name_ru, И с name_short_ru — совпадение по любому из двух полей
+    // считается совпадением.
     //
     // НАЙДЕНО 14.09, ВТОРОЙ ЗАХОД (после деплоя фикса выше все города вообще пропали, включая
     // ранее верно определявшиеся Линда→Ярославль, Фактор2→Пермь — временная регрессия): сама CMS
@@ -206,14 +222,15 @@ async function fetchVenueCity(cabinetId, venueName) {
     // (как исходно и работало), а `&page=N` добавляем только начиная со 2-й.
     const ids = [];
     for (let page = 1; page <= 6; page++) {
-      const path = page === 1
-        ? `/halls/?_q=${encodeURIComponent(venueName)}`
-        : `/halls/?_q=${encodeURIComponent(venueName)}&page=${page}`;
+      const path = page === 1 ? `/halls/?_q=${encodeURIComponent(venueName)}` : `/halls/?_q=${encodeURIComponent(venueName)}&page=${page}`;
       const r = await get(path);
       const re = /href="edit\?id=(\d+)" class="js-venue-item"[^>]*>/g;
       let m;
       let found = 0;
-      while ((m = re.exec(r.body))) { ids.push(m[1]); found++; }
+      while ((m = re.exec(r.body))) {
+        ids.push(m[1]);
+        found++;
+      }
       if (found < 25) break; // последняя страница
     }
     const cities = new Set();
@@ -228,7 +245,9 @@ async function fetchVenueCity(cabinetId, venueName) {
     }
     if (cities.size === 1) result.city = [...cities][0];
     else if (cities.size > 1) result.candidates = [...cities];
-  } catch { /* сеть подвела — не критично, город останется пустым в этот раз */ }
+  } catch {
+    /* сеть подвела — не критично, город останется пустым в этот раз */
+  }
   venueCityCache[cacheKey] = result;
   venueCacheDirty = true;
   return result;
@@ -250,7 +269,10 @@ async function orgs() {
   $('table tr').each((_, tr) => {
     if (stop) return;
     const txt = $(tr).text();
-    if (/Архив/.test(txt)) { stop = true; return; }
+    if (/Архив/.test(txt)) {
+      stop = true;
+      return;
+    }
     if ($(tr).find('td').length === 0) return;
     const m = $.html(tr).match(/\b(\d{6,9})\b/);
     if (m) ids.push(m[1]);
@@ -314,7 +336,10 @@ async function evData(oid) {
       const sum = parseInt(v[12].replace(/[^\d]/g, '')) || 0;
       const k = `${cur.name}|${cur.date}|${cur.time}`;
       if (!acc[k]) acc[k] = { name: cur.name, date: cur.date, time: cur.time, paid: 0, free: 0, rev: 0 };
-      if (price > 0) { acc[k].paid += bil; acc[k].rev += sum; } else acc[k].free += bil;
+      if (price > 0) {
+        acc[k].paid += bil;
+        acc[k].rev += sum;
+      } else acc[k].free += bil;
     }
   });
   return Object.values(acc);
@@ -348,29 +373,50 @@ async function evData(oid) {
 // задваивались (считались и в 🎟️, и внутри 💃/🪑). Фикс — подытог сектора теперь считаем САМИ, суммируя
 // «Продано» только по ценовым строкам с ценой > 0 (строку с ценой = 0 просто пропускаем), а не берём
 // готовую строку-подытог из HTML — так сумма категорий бьётся в тот же 🎫, что и раньше.
+//
+// НАЙДЕНО 26.09 по жалобе Павла (Фактор 2, Кузнецк и Саранск — в этих городах ТОЛЬКО посадка, а
+// 🪑 (148) оказалось БОЛЬШЕ, чем общий 🎫-итог (132) — логически невозможная ситуация): «Продано»
+// (индексы 13/14) — это ВАЛОВЫЕ продажи, ВКЛЮЧАЯ билеты, которые потом вернули. А общий 🎫-итог
+// (evData(), ext=1 у /organizer) на самом деле берёт другую колонку своего отчёта — «ИТОГО» —
+// которая уже ЗА ВЫЧЕТОМ возвратов («Возвращено», индексы 17/18: ИТОГО = Продано − Возвращено).
+// Из-за этого в городах с возвратами разбивка по секторам (которая суммировала «Продано») стала
+// больше общего итога (который уже без возвратов). Проверено на живых данных (event_id=68142855,
+// Кузнецк): Продано=150, Возвращено=16, ИТОГО=134 — и 134 в точности совпадает с paid из evData().
+// Фикс — берём из отчёта «по секторам» ту же колонку «ИТОГО» (индексы 19/20 в плоском массиве
+// ячеек строки), а не «Продано» — так разбивка по категориям снова не может превышать общий 🎫-итог.
 async function sectorCategoryTotals(eventId) {
   const r = await get(`/reports/tickets/event?report=1&event_id=${eventId}&ext=1`);
   if (looksLikeLogin(r)) throw new Error('AUTH_FAILED: не залогинен (sector report)');
   const $ = cheerio.load(r.body);
   let curSector = null;
   const acc = {}; // название сектора -> {bil,sum}, только по ценам > 0
-  $('table').first().find('tr').each((_, tr) => {
-    const c = $(tr).find('td,th');
-    if (c.length === 1) {
-      const t = $(c[0]).text().replace(/\s+/g, ' ').trim();
-      if (t) { curSector = t; if (!acc[curSector]) acc[curSector] = { bil: 0, sum: 0 }; }
-      return;
-    }
-    if (c.length < 2) return;
-    const v = c.map((i, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
-    if (v[0] === '') { curSector = null; return; } // строка-подытог сектора ИЛИ общий итог — не сектора, дальше не читаем (curSector уже обнулён)
-    if (!curSector) return; // строки до первого заголовка сектора (шапка таблицы) — сюда не попадают, т.к. v[0] у шапки непустой ("Цена"/"Билетов"), но на всякий случай
-    const price = parseFloat(v[0].replace(/\s+/g, '')) || 0;
-    if (price <= 0) return; // цена 0 — пригласительные, уже учтены отдельно в 🎟️ (evData/free), в категории не включаем
-    const bil = parseInt((v[13] || '0').replace(/[^\d-]/g, '')) || 0;
-    const sum = parseInt((v[14] || '0').replace(/[^\d-]/g, '')) || 0;
-    acc[curSector].bil += bil; acc[curSector].sum += sum;
-  });
+  $('table')
+    .first()
+    .find('tr')
+    .each((_, tr) => {
+      const c = $(tr).find('td,th');
+      if (c.length === 1) {
+        const t = $(c[0]).text().replace(/\s+/g, ' ').trim();
+        if (t) {
+          curSector = t;
+          if (!acc[curSector]) acc[curSector] = { bil: 0, sum: 0 };
+        }
+        return;
+      }
+      if (c.length < 2) return;
+      const v = c.map((i, el) => $(el).text().replace(/\s+/g, ' ').trim()).get();
+      if (v[0] === '') {
+        curSector = null;
+        return;
+      } // строка-подытог сектора ИЛИ общий итог — не сектора, дальше не читаем (curSector уже обнулён)
+      if (!curSector) return; // строки до первого заголовка сектора (шапка таблицы) — сюда не попадают, т.к. v[0] у шапки непустой ("Цена"/"Билетов"), но на всякий случай
+      const price = parseFloat(v[0].replace(/\s+/g, '')) || 0;
+      if (price <= 0) return; // цена 0 — пригласительные, уже учтены отдельно в 🎟️ (evData/free), в категории не включаем
+      const bil = parseInt((v[19] || '0').replace(/[^\d-]/g, '')) || 0;
+      const sum = parseInt((v[20] || '0').replace(/[^\d-]/g, '')) || 0;
+      acc[curSector].bil += bil;
+      acc[curSector].sum += sum;
+    });
   return Object.entries(acc).map(([name, t]) => ({ name, bil: t.bil, sum: t.sum }));
 }
 
@@ -394,11 +440,16 @@ async function categoryTotals(eventIds) {
   const cat = { dance: { bil: 0, sum: 0 }, vip: { bil: 0, sum: 0 }, seat: { bil: 0, sum: 0 }, other: { bil: 0, sum: 0 } };
   for (const id of eventIds) {
     let sectors;
-    try { sectors = await sectorCategoryTotals(id); }
-    catch (e) { console.error(`[debug] отчёт по секторам event_id=${id}: ${e.message || e}`); continue; }
+    try {
+      sectors = await sectorCategoryTotals(id);
+    } catch (e) {
+      console.error(`[debug] отчёт по секторам event_id=${id}: ${e.message || e}`);
+      continue;
+    }
     for (const s of sectors) {
       const c = sectorCategory(s.name);
-      cat[c].bil += s.bil; cat[c].sum += s.sum;
+      cat[c].bil += s.bil;
+      cat[c].sum += s.sum;
     }
   }
   return cat;
@@ -408,7 +459,8 @@ async function categoryTotals(eventIds) {
 async function soldVenues() {
   const r = await get('/reports/tickets/sold?form');
   const $ = cheerio.load(r.body);
-  let venue = '', hall = '';
+  let venue = '',
+    hall = '';
   const out = {};
   $('table tr').each((_, tr) => {
     const tds = $(tr).find('td');
@@ -466,18 +518,32 @@ function deltaUnitsStr(cur, prior) {
   for (const cab of cabs) {
     await get('/city?id=' + cab.id);
     let oids;
-    try { oids = await orgs(); } catch (e) { console.error(`Кабинет ${cab.name}: ${e.message}`); continue; }
-    if (!oids.length) { console.error(`[debug] кабинет ${cab.id} ${cab.name}: организаторов нет`); continue; }
+    try {
+      oids = await orgs();
+    } catch (e) {
+      console.error(`Кабинет ${cab.name}: ${e.message}`);
+      continue;
+    }
+    if (!oids.length) {
+      console.error(`[debug] кабинет ${cab.id} ${cab.name}: организаторов нет`);
+      continue;
+    }
     const act = new Set();
     let evs = [];
     for (const oid of oids) {
       const as = await activeSet(oid);
       as.active.forEach(x => act.add(x));
-      for (const [k, v] of Object.entries(as.ids)) { (eventIdsByKey[k] || (eventIdsByKey[k] = [])).push(...v); }
+      for (const [k, v] of Object.entries(as.ids)) {
+        (eventIdsByKey[k] || (eventIdsByKey[k] = [])).push(...v);
+      }
       evs = evs.concat(await evData(oid));
     }
     let venues = {};
-    try { venues = await soldVenues(); } catch { /* нет данных о зале — не критично */ }
+    try {
+      venues = await soldVenues();
+    } catch {
+      /* нет данных о зале — не критично */
+    }
     let keptForCab = 0;
     for (const e of evs) {
       if (/^тест/i.test(e.name)) continue;
@@ -499,9 +565,16 @@ function deltaUnitsStr(cur, prior) {
         }
       }
       events[key] = {
-        name: e.name, date: e.date, time: e.time || '', paid: e.paid, free: e.free,
-        venue: v.venue || '', hall: v.hall || '', cabinet: cab.name,
-        city, active: act.has(key),
+        name: e.name,
+        date: e.date,
+        time: e.time || '',
+        paid: e.paid,
+        free: e.free,
+        venue: v.venue || '',
+        hall: v.hall || '',
+        cabinet: cab.name,
+        city,
+        active: act.has(key),
       };
       keptForCab++;
     }
@@ -530,19 +603,24 @@ function deltaUnitsStr(cur, prior) {
   // soldVenues() строит площадку («банер») ТОЛЬКО для событий, которые реально были в продаже
   // («События в продаже» в самой CMS) — значит пустой x.venue у события с нулевыми паid/free
   // означает «в продаже не был», и такое событие из отчёта тоже убираем, а не только будущие черновики.
-  const keys = Object.keys(events).filter(k => {
-    const x = events[k];
-    const evKey = x.date.split('.').reverse().join('');
-    if (!x.active && evKey >= todayKey) return false; // черновик с датой в будущем
-    if (!x.active && !x.venue && x.paid === 0 && x.free === 0) return false; // черновик, который так и не был в продаже (дата уже прошла, но банера продаж никогда не было)
-    return true;
-  }).sort((a, b) => {
-    const da = events[a].date.split('.').reverse().join('');
-    const db = events[b].date.split('.').reverse().join('');
-    return da.localeCompare(db);
-  });
+  const keys = Object.keys(events)
+    .filter(k => {
+      const x = events[k];
+      const evKey = x.date.split('.').reverse().join('');
+      if (!x.active && evKey >= todayKey) return false; // черновик с датой в будущем
+      if (!x.active && !x.venue && x.paid === 0 && x.free === 0) return false; // черновик, который так и не был в продаже (дата уже прошла, но банера продаж никогда не было)
+      return true;
+    })
+    .sort((a, b) => {
+      const da = events[a].date.split('.').reverse().join('');
+      const db = events[b].date.split('.').reverse().join('');
+      return da.localeCompare(db);
+    });
 
-  let onSale = 0, finished = 0, totalPaid = 0, totalFree = 0;
+  let onSale = 0,
+    finished = 0,
+    totalPaid = 0,
+    totalFree = 0;
   const blocks = [];
   for (const k of keys) {
     const x = events[k];
@@ -551,8 +629,10 @@ function deltaUnitsStr(cur, prior) {
     // и без active уже отфильтрованы выше.
     const evKey = x.date.split('.').reverse().join('');
     const isFinished = !x.active || evKey < todayKey;
-    if (isFinished) finished++; else onSale++;
-    totalPaid += x.paid; totalFree += x.free;
+    if (isFinished) finished++;
+    else onSale++;
+    totalPaid += x.paid;
+    totalFree += x.free;
 
     const prior = pe[k];
     const d = deltaUnitsStr(x.paid, prior ? prior.paid : undefined);
@@ -564,13 +644,11 @@ function deltaUnitsStr(cur, prior) {
     const alreadyReported = !!(prior && prior.reported);
     if (isFinished && alreadyReported) continue;
 
-    const statusLine = `${x.name}   ${isFinished ? 'Завершён' : 'В продаже'}`;
+    const statusLine = `${x.name} ${isFinished ? 'Завершён' : 'В продаже'}`;
     const cityLine = x.city ? `📍 ${x.city}\n` : '';
     // x.hall — это описание рассадки/зоны продаж («ТП + столы»), а не город/зал — в реальном
     // отчёте такого нет, поэтому в сообщение идёт только название площадки.
-    const countLine = isFinished
-      ? `🏁 ИТОГ: 🎫 ${fmt(x.paid)}${d}`
-      : `🎫 ${fmt(x.paid)}${d}`;
+    const countLine = isFinished ? `🏁 ИТОГ: 🎫 ${fmt(x.paid)}${d}` : `🎫 ${fmt(x.paid)}${d}`;
 
     // Разбивка по категориям (💃 танцпол / 🔝 VIP / 🪑 посадка) — прототип по просьбе Павла (14.09):
     // берём event_id этого мероприятия (может быть несколько на один ключ, см. eventIdsByKey/activeSet)
@@ -603,23 +681,25 @@ function deltaUnitsStr(cur, prior) {
     // Дата с временем — если в этот день у мероприятия несколько разных показов (напр. «Моя Мишель»
     // 26.09 в 19:00 и 19:30 — это два разных концерта), без времени их было бы не отличить в тексте.
     const dateLine = x.time ? `${x.date} ${x.time}` : x.date;
-    blocks.push(
-      `${statusLine}\n${cityLine}${x.venue ? x.venue + '\n' : ''}${dateLine}\n${countLine}${catLines}${freeLine}`
-    );
+    blocks.push(`${statusLine}\n${cityLine}${x.venue ? x.venue + '\n' : ''}${dateLine}\n${countLine}${catLines}${freeLine}`);
   }
 
-  const header = `📊 ОТЧЁТ ПО ПРОДАЖАМ — неделя от ${dateStr}\n` +
-    `В продаже: ${fmt(onSale)} · продано (без пригласительных): ${fmt(totalPaid)} · пригласительных: ${fmt(totalFree)} · завершено: ${fmt(finished)}`;
+  const header = `📊 ОТЧЁТ ПО ПРОДАЖАМ — неделя от ${dateStr}\n` + `В продаже: ${fmt(onSale)} · продано (без пригласительных): ${fmt(totalPaid)} · пригласительных: ${fmt(totalFree)} · завершено: ${fmt(finished)}`;
 
   // разбиваем на сообщения по ~3500 символов
   let chunk = header;
   const chunks = [];
   for (const b of blocks) {
-    if ((chunk + '\n\n' + b).length > 3500) { chunks.push(chunk); chunk = b; }
-    else chunk += '\n\n' + b;
+    if ((chunk + '\n\n' + b).length > 3500) {
+      chunks.push(chunk);
+      chunk = b;
+    } else chunk += '\n\n' + b;
   }
   chunks.push(chunk);
-  for (const c of chunks) { await tg(c); await new Promise(z => setTimeout(z, 350)); }
+  for (const c of chunks) {
+    await tg(c);
+    await new Promise(z => setTimeout(z, 350));
+  }
 
   // Сообщение «ИТОГО ПО МЕСЯЦАМ» убрано по просьбе пользователя (не нужно) — 07.09.
   const snapEvents = {};
@@ -641,15 +721,21 @@ function deltaUnitsStr(cur, prior) {
   // Кеш города по площадкам обновляем всегда (даже в DRY_RUN) — он не влияет на текст отчёта
   // и на дельты между неделями, только экономит запросы к /halls/ в следующий раз.
   if (venueCacheDirty) {
-    try { fs.writeFileSync(VENUE_CACHE_FILE, JSON.stringify(venueCityCache, null, 2)); }
-    catch (e) { console.error('[debug] не удалось сохранить venue-city-cache.json:', e.message || e); }
+    try {
+      fs.writeFileSync(VENUE_CACHE_FILE, JSON.stringify(venueCityCache, null, 2));
+    } catch (e) {
+      console.error('[debug] не удалось сохранить venue-city-cache.json:', e.message || e);
+    }
   }
   // Площадки-дубли (одинаковое название, разные города в CMS), которые не удалось различить даже
   // по комментарию мероприятия — город не показан. Список — только в лог, Павлу для ручной проверки
   // /переименования дублей в разделе «Залы» (или уточнения комментария у мероприятия).
   if (ambiguousVenues.length) {
     console.error('[warn] город не определён однозначно (в CMS несколько залов с одинаковым названием, но разными городами):');
-    for (const a of ambiguousVenues) console.error(`  - "${a.venue}" (${a.event}, ${a.date}): ${a.cities.join(' / ')}`);
+    for (const a of ambiguousVenues) console.error(` - "${a.venue}" (${a.event}, ${a.date}): ${a.cities.join(' / ')}`);
   }
   console.log(`OK: кабинетов ${cabs.length}, мероприятий ${keys.length} (в продаже ${onSale}, завершено ${finished})`);
-})().catch(e => { console.error(e.message || e); process.exit(1); });
+})().catch(e => {
+  console.error(e.message || e);
+  process.exit(1);
+});
