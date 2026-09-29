@@ -13,7 +13,7 @@ import fs from 'node:fs';
 const COOKIE = (process.env.YANDEX_COOKIE || '').trim();
 const TG_TOKEN = (process.env.TG_TOKEN || '').trim();
 const CHAT_ID = (process.env.CHAT_ID || '').trim();
-const CAB = '30513587';                    // кабинет ООО Миксмастер
+const CAB = '30513587'; // кабинет ООО Миксмастер
 const BASE = 'https://cms.tickets.yandex.ru';
 const SNAP_FILE = 'snapshot.json';
 
@@ -42,7 +42,7 @@ function mergeSetCookie(res) {
     const kv = part.split(';')[0].trim();
     if (/^[^=]+=/.test(kv)) {
       const name = kv.split('=')[0];
-      cookie = cookie.replace(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '=[^;]*'), '').replace(/^; /, '').trim();
+      cookie = cookie.replace(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=[^;]*'), '').replace(/^; /, '').trim();
       cookie = (cookie ? cookie + '; ' : '') + kv;
     }
   }
@@ -145,26 +145,48 @@ async function evStatus(oid) {
     out.push({
       name: v[0],
       date: dm[1],
-      status: v[2] || '',                                   // '' = на продаже, иначе закрыто/отменено
-      sold: parseInt((v[13] || '0').replace(/[^\d]/g, '')) || 0,   // «Продано», билетов
-      avail: parseInt((v[5] || '0').replace(/[^\d]/g, '')) || 0,   // «Свободно», билетов
+      status: v[2] || '', // '' = на продаже, иначе закрыто/отменено
+      sold: parseInt((v[13] || '0').replace(/[^\d]/g, '')) || 0, // «Продано», билетов
+      avail: parseInt((v[5] || '0').replace(/[^\d]/g, '')) || 0, // «Свободно», билетов
     });
   });
   return out;
 }
 
-async function tg(text) {
+// НАЙДЕНО 29.09 по жалобе Павла («ежедневный отчёт пришёл только 1 месяц»): скрипт честно
+// посчитал все месяцы и начал слать по одному сообщению на месяц, но у ОДНОЙ из отправок Telegram
+// API вернул временную ошибку (напр. {"ok":false,"error_code":504,"description":"Gateway Timeout"} —
+// перегрузка/сбой на стороне самого Telegram) — tg() тогда просто бросал исключение и весь прогон
+// обрывался, так и не отправив остальные месяцы и итоговое сообщение. Автоповтора в cron нет (скрипт
+// запускается раз в день), поэтому один неудачный http-запрос к Telegram полностью срывал рассылку.
+// Фикс — tg() теперь сам повторяет отправку КОНКРЕТНОГО сообщения до 3 раз при ошибке (сетевой сбой
+// ИЛИ Telegram вернул {ok:false}), с паузой между попытками — уважая retry_after от Telegram, если он
+// его прислал (обычно при 429 — превышении лимита частоты), иначе нарастающая пауза 2с/4с. Бросает
+// исключение (как раньше) только если все 3 попытки не удались — тогда прогон всё ещё может оборваться,
+// но уже не из-за одного случайного таймаута.
+async function tg(text, attempt = 1) {
   if ((process.env.DRY_RUN || '') === '1') {
     console.error('[debug] DRY_RUN — сообщение НЕ отправлено:\n' + text);
     return;
   }
-  const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: CHAT_ID, text, disable_web_page_preview: true }),
-  });
-  const j = await res.json();
-  if (!j.ok) throw new Error('Telegram error: ' + JSON.stringify(j));
+  const MAX_ATTEMPTS = 3;
+  let j;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: CHAT_ID, text, disable_web_page_preview: true }),
+    });
+    j = await res.json();
+  } catch (e) {
+    j = { ok: false, description: `network error: ${e.message || e}` };
+  }
+  if (j.ok) return;
+  if (attempt >= MAX_ATTEMPTS) throw new Error('Telegram error: ' + JSON.stringify(j));
+  const delayMs = (j.parameters && j.parameters.retry_after) ? j.parameters.retry_after * 1000 : attempt * 2000;
+  console.error(`[debug] Telegram send не удался (попытка ${attempt}/${MAX_ATTEMPTS}): ${JSON.stringify(j)} — повтор через ${delayMs}мс`);
+  await new Promise(z => setTimeout(z, delayMs));
+  return tg(text, attempt + 1);
 }
 
 (async () => {
@@ -208,7 +230,7 @@ async function tg(text) {
     months[key].paid += e.paid; months[key].free += e.free; months[key].rev += e.rev;
     months[key].count += 1;
   }
-  console.error(`[debug] months: ${JSON.stringify(Object.fromEntries(Object.entries(months).map(([k,v])=>[k,{count:v.count,paid:v.paid,rev:v.rev}])))}`);
+  console.error(`[debug] months: ${JSON.stringify(Object.fromEntries(Object.entries(months).map(([k, v]) => [k, { count: v.count, paid: v.paid, rev: v.rev }])))}`);
 
   const prev = fs.existsSync(SNAP_FILE) ? JSON.parse(fs.readFileSync(SNAP_FILE, 'utf8') || '{}') : {};
   const pm = prev.months || null;
